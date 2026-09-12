@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any
 
 try:
@@ -10,12 +11,7 @@ except ImportError:  # pragma: no cover
 
 
 class CentralStore:
-    """Small PostgreSQL adapter used by the authenticated edge sync layer.
-
-    The AI process can run without PostgreSQL. When DATABASE_URL is absent or
-    psycopg is unavailable, the store remains disabled rather than breaking
-    local edge inference.
-    """
+    """PostgreSQL adapter for the central event, alert and evidence store."""
 
     def __init__(self) -> None:
         self.database_url = os.getenv("DATABASE_URL", "")
@@ -33,32 +29,28 @@ class CentralStore:
         except Exception as exc:
             return {"enabled": True, "connected": False, "reason": str(exc)}
 
+    @staticmethod
+    def _db_event_id(event_id: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"avclpr:event:{event_id}"))
+
     def insert_event(self, event: dict[str, Any]) -> str:
         if not self.enabled:
             raise RuntimeError("Central PostgreSQL store is not enabled")
-        query = """
+        db_id = self._db_event_id(str(event["event_id"]))
+        event_sql = """
         INSERT INTO vehicle_events (
             id, site_id, camera_id, event_timestamp, tracking_id,
             vehicle_type, direction, detection_confidence, plate_number,
             normalized_plate, plate_confidence, watchlist_status,
             watchlist_category, snapshot_path, evidence_hash,
             processing_time_ms, model_version, ai_node_id
-        )
-        VALUES (
-            %s, %s, %s, to_timestamp(%s), %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s
-        )
-        ON CONFLICT (id) DO NOTHING
-        RETURNING id::text
+        ) VALUES (
+            %s, %s, %s, to_timestamp(%s), %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s
+        ) ON CONFLICT (id) DO NOTHING
         """
-        event_id = event.get("event_id")
-        # Application event IDs are not UUIDs, so use a deterministic UUID5
-        # derived from the event ID for the PostgreSQL primary key.
-        import uuid
-        db_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"avclpr:event:{event_id}"))
         with psycopg.connect(self.database_url) as conn:
-            row = conn.execute(query, (
+            conn.execute(event_sql, (
                 db_id,
                 event["site_uuid"],
                 event["camera_uuid"],
@@ -77,6 +69,40 @@ class CentralStore:
                 None,
                 os.getenv("AI_MODEL_VERSION", "unknown"),
                 os.getenv("EDGE_SITE_ID", "unknown"),
-            ).fetchone()
+            ))
+
+            alert = event.get("alert")
+            if alert:
+                alert_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"avclpr:alert:{alert['id']}"))
+                severity = str(alert.get("severity", "medium")).lower()
+                if severity not in {"low", "medium", "high", "critical"}:
+                    severity = "medium"
+                conn.execute(
+                    """INSERT INTO alerts
+                    (id,event_id,site_id,camera_id,type,severity,title,description,status)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active')
+                    ON CONFLICT (id) DO NOTHING""",
+                    (
+                        alert_id, db_id, event["site_uuid"], event["camera_uuid"],
+                        "WATCHLIST_MATCH", severity, "Watchlist vehicle detected",
+                        alert.get("message"),
+                    ),
+                )
+
+            evidence = event.get("evidence")
+            if evidence:
+                evidence_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"avclpr:evidence:{event['event_id']}"))
+                retention_days = int(os.getenv("EVIDENCE_RETENTION_DAYS", "90"))
+                conn.execute(
+                    """INSERT INTO evidence
+                    (id,event_id,evidence_type,object_path,sha256_hash,size_bytes,captured_at,retention_until)
+                    VALUES (%s,%s,%s,%s,%s,%s,to_timestamp(%s),to_timestamp(%s))
+                    ON CONFLICT (id) DO NOTHING""",
+                    (
+                        evidence_id, db_id, "vehicle_frame", evidence["path"],
+                        evidence["sha256"], evidence.get("size_bytes"),
+                        event["timestamp"], event["timestamp"] + retention_days * 86400,
+                    ),
+                )
             conn.commit()
-        return row[0] if row else db_id
+        return db_id
