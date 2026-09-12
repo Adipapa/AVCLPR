@@ -7,3 +7,4 @@ pillow
 ultralytics
 python-multipart
 pytesseract
+psycopg[binary]>=3.2,<4
