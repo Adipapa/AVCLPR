@@ -1,3 +1,4 @@
+import './production-foundation.js';
 import { db } from './server-db.js';
 
 const policy: Record<string, string[]> = {
