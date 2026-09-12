@@ -4,7 +4,7 @@ Python inference service for edge AI processing.
 
 ## Current pipeline
 
-RTSP frame -> frame sampler -> vehicle detector -> persistent tracker -> plate detector -> OCR -> plate/vehicle association -> deduplicated vehicle event -> watchlist matching -> alert generation -> evidence hashing/storage -> authenticated event API.
+RTSP frame -> frame sampler -> vehicle detector -> persistent tracker -> plate detector -> OCR -> plate/vehicle association -> deduplicated vehicle event -> watchlist matching -> alert generation -> evidence hashing/storage -> durable edge outbox -> central PostgreSQL synchronization.
 
 ## Models
 
@@ -23,7 +23,10 @@ The repository does not include model weights.
 - `POST /v1/inference/plates`
 - `POST /v1/inference/vehicle-with-plate`
 - `POST /v1/inference/tracked-frame`
-- `POST /v1/events/process-frame` — complete edge pipeline
+- `POST /v1/events/process-frame` — complete offline-first edge pipeline
+- `POST /v1/sync/run` — drain the local event outbox to PostgreSQL
+- `GET /v1/sync/status`
+- `GET /v1/central/health`
 - `GET /v1/watchlists`
 - `POST /v1/watchlists`
 - `DELETE /v1/watchlists/{plate}`
@@ -39,7 +42,18 @@ The repository does not include model weights.
 - Watchlist matches are exact normalized-plate matches.
 - Watchlist categories generate alert severity; this is an operational alert signal, not an automatic enforcement decision.
 - Evidence is written to `EVIDENCE_ROOT` and SHA-256 hashed.
-- The edge watchlist is intentionally in-memory. PostgreSQL remains the authoritative production store and synchronization is a later platform phase.
+- Events are first placed in a durable SQLite outbox, allowing a site to continue operating during WAN/database outages.
+- `/v1/sync/run` retries pending events with exponential backoff and removes them only after successful PostgreSQL persistence.
+
+## Central database
+
+The PostgreSQL schema in `database/postgresql/001_initial_schema.sql` is the central authoritative target. Central event persistence requires valid `site_uuid` and `camera_uuid` values that correspond to the central `sites` and `cameras` tables.
+
+The AI service does not require PostgreSQL to perform local inference. If the central database is unavailable, events remain in the local outbox.
+
+## 10-site deployment model
+
+Each highway location can run an independent edge AI node and local outbox. All ten nodes synchronize vehicle events to the central PostgreSQL platform when connectivity is available. This prevents a temporary network outage at one site from stopping local detection.
 
 ## Configuration
 
@@ -52,6 +66,7 @@ The repository does not include model weights.
 - `PLATE_IMAGE_SIZE`
 - `OCR_PSM`
 - `AI_SERVICE_TOKEN`
+- `AI_MODEL_VERSION`
 - `TRACKER_IOU_THRESHOLD`
 - `TRACKER_MAX_MISSED_FRAMES`
 - `PLATE_ASSOC_IOU_THRESHOLD`
@@ -60,6 +75,8 @@ The repository does not include model weights.
 - `EVENT_DEDUP_SECONDS`
 - `EVENT_MAX_RECENT_EVENTS`
 - `EVIDENCE_ROOT`
+- `DATABASE_URL`
+- `EDGE_QUEUE_DB`
 
 ## OCR requirement
 
@@ -70,11 +87,11 @@ The repository does not include model weights.
 - GPU acceleration where available.
 - Explicit model versioning.
 - Bounded frame queues and backpressure.
-- Central PostgreSQL persistence and edge synchronization.
-- Durable watchlists and alert records.
+- Durable PostgreSQL watchlists and alert records still need to be wired into the edge cache synchronization service.
 - Camera/site-specific direction calibration or virtual-line logic.
 - Validated speed estimation before exposing speed as an enforcement measurement.
 - Evidence retention/deletion jobs and controlled evidence access.
+- RTSP camera worker/service and multi-camera scheduling still need integration with this API.
 - Validation using representative Gambian road footage, including day/night, blur, rain and oblique plate angles.
 
 OCR output must not automatically be treated as a legally valid plate reading. Plate-format validation, confidence handling and human-review rules must be established before operational use.
