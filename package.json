@@ -1,0 +1,36 @@
+{
+  "name": "avclpr1",
+  "version": "1.0.0",
+  "description": "QTS AI Vehicle Intelligence and License Plate Recognition Platform",
+  "main": "server.ts",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [
+    "ai",
+    "vehicle",
+    "anpr",
+    "alpr",
+    "traffic",
+    "surveillance"
+  ],
+  "author": "Quality Tech Services",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@google/genai": "^2.18.0",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
