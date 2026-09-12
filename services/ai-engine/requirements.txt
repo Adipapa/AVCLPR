@@ -3,3 +3,6 @@ uvicorn[standard]
 pydantic
 numpy
 opencv-python-headless
+pillow
+ultralytics
+python-multipart
