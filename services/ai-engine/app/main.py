@@ -4,16 +4,18 @@ from io import BytesIO
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from PIL import Image
 
+from .central_store import CentralStore
 from .event_pipeline import EventBuilder, WatchlistMatcher
 from .inference import infer, load_model, model_status
 from .plate_ocr import detect_and_read, load_plate_model, plate_model_status
 from .tracker import VehicleTracker
 
-app = FastAPI(title="AVCLPR AI Engine", version="0.5.0")
+app = FastAPI(title="AVCLPR AI Engine", version="0.6.0")
 AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "")
 tracker = VehicleTracker()
 watchlists = WatchlistMatcher()
 events = EventBuilder(watchlists)
+central = CentralStore()
 
 
 @app.on_event("startup")
@@ -34,6 +36,7 @@ def health():
         "plate_model": plate,
         "tracker": {"active_tracks": len(tracker._tracks)},
         "event_pipeline": {"recent_dedup_keys": events.recent_keys()},
+        "central_store": central.health(),
     }
 
 
@@ -115,10 +118,15 @@ async def process_event_frame(
     image: UploadFile = File(...),
     site_id: str = "SITE-01",
     camera_id: str = "CAM-01-01",
+    site_uuid: str | None = None,
+    camera_uuid: str | None = None,
+    sync: bool = False,
     x_ai_service_token: str | None = Header(default=None),
 ):
-    """Complete edge pipeline: detection -> tracking -> ANPR -> watchlist -> alert -> evidence."""
+    """Edge pipeline: detection -> tracking -> ANPR -> watchlist -> alert -> evidence."""
     require_service_token(x_ai_service_token)
+    if sync and (not site_uuid or not camera_uuid):
+        raise HTTPException(status_code=400, detail="site_uuid and camera_uuid are required when sync=true")
     frame, payload = await read_image(image)
     try:
         vehicles = infer(frame)
@@ -126,9 +134,23 @@ async def process_event_frame(
         tracker.update(vehicles)
         tracks = tracker.associate_plates(plates)
         built_events = events.build(tracks, site_id=site_id, camera_id=camera_id, frame_payload=payload)
+        if sync:
+            for event in built_events:
+                event["site_uuid"] = site_uuid
+                event["camera_uuid"] = camera_uuid
+                central.insert_event(event)
+                event["central_persisted"] = True
     except (RuntimeError, OSError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"success": True, "site_id": site_id, "camera_id": camera_id, "vehicle_detections": len(vehicles), "plate_detections": len(plates), "active_tracks": len(tracks), "events_created": len(built_events), "events": built_events}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Central persistence failed: {exc}") from exc
+    return {"success": True, "site_id": site_id, "camera_id": camera_id, "vehicle_detections": len(vehicles), "plate_detections": len(plates), "active_tracks": len(tracks), "events_created": len(built_events), "central_sync_requested": sync, "events": built_events}
+
+
+@app.get("/v1/central/health")
+def central_health(x_ai_service_token: str | None = Header(default=None)):
+    require_service_token(x_ai_service_token)
+    return central.health()
 
 
 @app.get("/v1/watchlists")
