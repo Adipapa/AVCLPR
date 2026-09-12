@@ -23,6 +23,10 @@ MAX_FRAME_QUEUE = max(1, int(os.getenv("AI_FRAME_QUEUE_SIZE", "2")))
 RECONNECT_SECONDS = max(1, float(os.getenv("RTSP_RECONNECT_SECONDS", "3")))
 FRAME_TIMEOUT_SECONDS = max(5, float(os.getenv("RTSP_FRAME_TIMEOUT_SECONDS", "15")))
 
+# Ultralytics/Tesseract model objects are process-global. Serialize inference
+# across camera workers until a dedicated GPU scheduler is introduced.
+AI_INFERENCE_LOCK = threading.Lock()
+
 
 @dataclass(frozen=True)
 class CameraWorkerConfig:
@@ -42,26 +46,18 @@ class CameraWorker:
     is discarded and the newest frame is retained.
     """
 
-    def __init__(
-        self,
-        config: CameraWorkerConfig,
-        outbox: SyncQueue,
-        central: CentralStore,
-        watchlists: WatchlistMatcher,
-    ) -> None:
+    def __init__(self, config: CameraWorkerConfig, outbox: SyncQueue, central: CentralStore, watchlists: WatchlistMatcher) -> None:
         self.config = config
         self.outbox = outbox
         self.central = central
         self.watchlists = watchlists
         self.events = EventBuilder(watchlists)
         self.tracker = VehicleTracker()
-
         self._capture_thread: threading.Thread | None = None
         self._process_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._queue_lock = threading.Lock()
         self._frames: deque[tuple[int, Any, float]] = deque(maxlen=MAX_FRAME_QUEUE)
-
         self._capture: cv2.VideoCapture | None = None
         self._connected = False
         self._last_frame_at: float | None = None
@@ -156,11 +152,9 @@ class CameraWorker:
                 self._last_error = "Unable to open RTSP stream"
                 self._stop.wait(RECONNECT_SECONDS)
                 continue
-
             self._capture = capture
             self._connected = True
             self._last_error = None
-
             try:
                 while not self._stop.is_set():
                     ok, frame = capture.read()
@@ -168,14 +162,11 @@ class CameraWorker:
                         self._connected = False
                         self._last_error = "RTSP frame read failed"
                         break
-
                     self._frame_counter += 1
                     self._frames_received += 1
                     self._last_frame_at = time.time()
-
                     if self._frame_counter % max(1, self.config.sample_every_n_frames) != 0:
                         continue
-
                     with self._queue_lock:
                         if len(self._frames) >= MAX_FRAME_QUEUE:
                             self._frames.popleft()
@@ -183,7 +174,6 @@ class CameraWorker:
                         self._frames.append((self._frame_counter, frame, self._last_frame_at))
             finally:
                 self._release_capture()
-
             if not self._stop.is_set():
                 self._reconnects += 1
                 self._stop.wait(RECONNECT_SECONDS)
@@ -200,7 +190,6 @@ class CameraWorker:
             if item is None:
                 self._stop.wait(0.01)
                 continue
-
             _, frame, timestamp = item
             try:
                 ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -208,18 +197,12 @@ class CameraWorker:
                     self._last_error = "JPEG evidence encoding failed"
                     continue
                 payload = encoded.tobytes()
-
-                vehicles = infer(frame)
-                plates = detect_and_read(frame)
+                with AI_INFERENCE_LOCK:
+                    vehicles = infer(frame)
+                    plates = detect_and_read(frame)
                 self.tracker.update(vehicles)
                 tracks = self.tracker.associate_plates(plates)
-                built = self.events.build(
-                    tracks,
-                    site_id=self.config.site_id,
-                    camera_id=self.config.camera_id,
-                    frame_payload=payload,
-                    timestamp=timestamp,
-                )
+                built = self.events.build(tracks, site_id=self.config.site_id, camera_id=self.config.camera_id, frame_payload=payload, timestamp=timestamp)
                 for event in built:
                     event["site_uuid"] = self.config.site_uuid
                     event["camera_uuid"] = self.config.camera_uuid
