@@ -7,9 +7,11 @@ from PIL import Image
 
 from .inference import infer, load_model, model_status
 from .plate_ocr import detect_and_read, load_plate_model, plate_model_status
+from .tracker import VehicleTracker
 
-app = FastAPI(title="AVCLPR AI Engine", version="0.3.0")
+app = FastAPI(title="AVCLPR AI Engine", version="0.4.0")
 AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "")
+tracker = VehicleTracker()
 
 
 class HealthResponse(BaseModel):
@@ -140,3 +142,37 @@ async def vehicle_with_plate_inference(
         "plates": plates,
         "plate_count": len(plates),
     }
+
+
+@app.post("/v1/inference/tracked-frame")
+async def tracked_frame_inference(
+    image: UploadFile = File(...),
+    x_ai_service_token: str | None = Header(default=None),
+):
+    """Run vehicle detection, persistent tracking, plate OCR, and association."""
+    require_service_token(x_ai_service_token)
+    frame = await read_image(image)
+    try:
+        vehicles = infer(frame)
+        plates = detect_and_read(frame)
+        tracked = tracker.update(vehicles)
+        tracked = tracker.associate_plates(plates)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "success": True,
+        "vehicle_model": model_status()["model_path"],
+        "plate_model": plate_model_status()["model_path"],
+        "vehicle_count": len(vehicles),
+        "plate_count": len(plates),
+        "tracked_vehicle_count": len(tracked),
+        "tracks": tracked,
+    }
+
+
+@app.post("/v1/tracker/reset")
+def reset_tracker(x_ai_service_token: str | None = Header(default=None)):
+    require_service_token(x_ai_service_token)
+    tracker.reset()
+    return {"success": True, "message": "Tracker state reset"}
