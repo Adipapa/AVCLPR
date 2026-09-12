@@ -8,14 +8,16 @@ from .central_store import CentralStore
 from .event_pipeline import EventBuilder, WatchlistMatcher
 from .inference import infer, load_model, model_status
 from .plate_ocr import detect_and_read, load_plate_model, plate_model_status
+from .sync_queue import SyncQueue
 from .tracker import VehicleTracker
 
-app = FastAPI(title="AVCLPR AI Engine", version="0.6.0")
+app = FastAPI(title="AVCLPR AI Engine", version="0.7.0")
 AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "")
 tracker = VehicleTracker()
 watchlists = WatchlistMatcher()
 events = EventBuilder(watchlists)
 central = CentralStore()
+outbox = SyncQueue()
 
 
 @app.on_event("startup")
@@ -37,6 +39,7 @@ def health():
         "tracker": {"active_tracks": len(tracker._tracks)},
         "event_pipeline": {"recent_dedup_keys": events.recent_keys()},
         "central_store": central.health(),
+        "sync_queue": outbox.stats(),
     }
 
 
@@ -55,6 +58,73 @@ async def read_image(image: UploadFile) -> tuple[Image.Image, bytes]:
         return Image.open(BytesIO(payload)).convert("RGB"), payload
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Unable to decode image: {exc}") from exc
+
+
+def sync_one(event: dict) -> bool:
+    try:
+        central.insert_event(event)
+        return True
+    except Exception:
+        return False
+
+
+@app.post("/v1/events/process-frame")
+async def process_event_frame(
+    image: UploadFile = File(...),
+    site_id: str = "SITE-01",
+    camera_id: str = "CAM-01-01",
+    site_uuid: str | None = None,
+    camera_uuid: str | None = None,
+    sync: bool = False,
+    x_ai_service_token: str | None = Header(default=None),
+):
+    """Offline-first edge pipeline. Events are persisted locally before optional central sync."""
+    require_service_token(x_ai_service_token)
+    if (site_uuid is None) != (camera_uuid is None):
+        raise HTTPException(status_code=400, detail="site_uuid and camera_uuid must be supplied together")
+    frame, payload = await read_image(image)
+    try:
+        vehicles = infer(frame)
+        plates = detect_and_read(frame)
+        tracker.update(vehicles)
+        tracks = tracker.associate_plates(plates)
+        built_events = events.build(tracks, site_id=site_id, camera_id=camera_id, frame_payload=payload)
+        for event in built_events:
+            event["site_uuid"] = site_uuid
+            event["camera_uuid"] = camera_uuid
+            outbox.enqueue(event)
+        if sync:
+            for item in outbox.pending(limit=max(1, len(built_events))):
+                if sync_one(item["event"]):
+                    outbox.acknowledge(item["row_id"])
+                else:
+                    outbox.fail(item["row_id"], "Central store unavailable")
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"success": True, "site_id": site_id, "camera_id": camera_id, "vehicle_detections": len(vehicles), "plate_detections": len(plates), "active_tracks": len(tracks), "events_created": len(built_events), "central_sync_requested": sync, "sync_queue": outbox.stats(), "events": built_events}
+
+
+@app.post("/v1/sync/run")
+def run_sync(limit: int = 100, x_ai_service_token: str | None = Header(default=None)):
+    require_service_token(x_ai_service_token)
+    if not central.health().get("connected"):
+        return {"success": False, "message": "Central database unavailable", "sync_queue": outbox.stats()}
+    synced = 0
+    failed = 0
+    for item in outbox.pending(limit=max(1, min(limit, 1000))):
+        if sync_one(item["event"]):
+            outbox.acknowledge(item["row_id"])
+            synced += 1
+        else:
+            outbox.fail(item["row_id"], "Central persistence failed")
+            failed += 1
+    return {"success": failed == 0, "synced": synced, "failed": failed, "sync_queue": outbox.stats()}
+
+
+@app.get("/v1/sync/status")
+def sync_status(x_ai_service_token: str | None = Header(default=None)):
+    require_service_token(x_ai_service_token)
+    return {"central_store": central.health(), "sync_queue": outbox.stats()}
 
 
 @app.post("/v1/inference/validate")
@@ -111,40 +181,6 @@ async def tracked_frame_inference(image: UploadFile = File(...), x_ai_service_to
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"success": True, "vehicle_model": model_status()["model_path"], "plate_model": plate_model_status()["model_path"], "vehicle_count": len(vehicles), "plate_count": len(plates), "tracked_vehicle_count": len(tracked), "tracks": tracked}
-
-
-@app.post("/v1/events/process-frame")
-async def process_event_frame(
-    image: UploadFile = File(...),
-    site_id: str = "SITE-01",
-    camera_id: str = "CAM-01-01",
-    site_uuid: str | None = None,
-    camera_uuid: str | None = None,
-    sync: bool = False,
-    x_ai_service_token: str | None = Header(default=None),
-):
-    """Edge pipeline: detection -> tracking -> ANPR -> watchlist -> alert -> evidence."""
-    require_service_token(x_ai_service_token)
-    if sync and (not site_uuid or not camera_uuid):
-        raise HTTPException(status_code=400, detail="site_uuid and camera_uuid are required when sync=true")
-    frame, payload = await read_image(image)
-    try:
-        vehicles = infer(frame)
-        plates = detect_and_read(frame)
-        tracker.update(vehicles)
-        tracks = tracker.associate_plates(plates)
-        built_events = events.build(tracks, site_id=site_id, camera_id=camera_id, frame_payload=payload)
-        if sync:
-            for event in built_events:
-                event["site_uuid"] = site_uuid
-                event["camera_uuid"] = camera_uuid
-                central.insert_event(event)
-                event["central_persisted"] = True
-    except (RuntimeError, OSError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Central persistence failed: {exc}") from exc
-    return {"success": True, "site_id": site_id, "camera_id": camera_id, "vehicle_detections": len(vehicles), "plate_detections": len(plates), "active_tracks": len(tracks), "events_created": len(built_events), "central_sync_requested": sync, "events": built_events}
 
 
 @app.get("/v1/central/health")
