@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import http from 'node:http';
 import dotenv from 'dotenv';
 import './src/lib/rbac-policy.js';
+import { bootstrapIsAvailable } from './src/lib/bootstrap-guard.js';
 import {
   authenticateToken,
   bootstrapAdmin,
@@ -60,21 +61,15 @@ function requirePermission(permission: string) {
 }
 
 function audit(req: AuthenticatedRequest, action: string, resourceType?: string, resourceId?: string) {
-  createAuditLog({
-    userId: req.user?.id,
-    action,
-    resourceType,
-    resourceId,
-    ipAddress: req.ip,
-    userAgent: req.header('user-agent'),
-  });
+  createAuditLog({ userId: req.user?.id, action, resourceType, resourceId, ipAddress: req.ip, userAgent: req.header('user-agent') });
 }
 
 app.get('/api/v2/health', (_req, res) => {
-  res.json({ success: true, system: 'AVCLPR', version: '2-foundation', status: 'online', timestamp: new Date().toISOString() });
+  res.json({ success: true, system: 'AVCLPR', version: '2-foundation', status: 'online', timestamp: new Date().toISOString(), bootstrapAvailable: bootstrapIsAvailable() });
 });
 
 app.post('/api/v2/auth/bootstrap', (req, res) => {
+  if (!bootstrapIsAvailable()) return res.status(409).json({ success: false, error: 'Administrator bootstrap has already been completed.' });
   try {
     const user = bootstrapAdmin({
       bootstrapSecret: String(req.body?.bootstrapSecret || ''),
@@ -109,11 +104,8 @@ app.get('/api/v2/sites', requireAuth, requirePermission('sites.read'), (_req, re
 app.post('/api/v2/sites', requireAuth, requirePermission('sites.write'), (req: AuthenticatedRequest, res) => {
   try {
     const site = createSite({
-      siteCode: String(req.body?.siteCode || '').trim(),
-      name: String(req.body?.name || '').trim(),
-      road: req.body?.road,
-      direction: req.body?.direction,
-      jurisdiction: req.body?.jurisdiction,
+      siteCode: String(req.body?.siteCode || '').trim(), name: String(req.body?.name || '').trim(),
+      road: req.body?.road, direction: req.body?.direction, jurisdiction: req.body?.jurisdiction,
       latitude: req.body?.latitude == null ? undefined : Number(req.body.latitude),
       longitude: req.body?.longitude == null ? undefined : Number(req.body.longitude),
     });
@@ -132,10 +124,8 @@ app.get('/api/v2/cameras', requireAuth, requirePermission('cameras.read'), (req,
 app.post('/api/v2/cameras', requireAuth, requirePermission('cameras.write'), (req: AuthenticatedRequest, res) => {
   try {
     const camera = createCamera({
-      siteId: String(req.body?.siteId || ''),
-      cameraCode: String(req.body?.cameraCode || '').trim(),
-      name: String(req.body?.name || '').trim(),
-      host: String(req.body?.host || '').trim(),
+      siteId: String(req.body?.siteId || ''), cameraCode: String(req.body?.cameraCode || '').trim(),
+      name: String(req.body?.name || '').trim(), host: String(req.body?.host || '').trim(),
       rtspPort: req.body?.rtspPort == null ? undefined : Number(req.body.rtspPort),
       channel: req.body?.channel == null ? undefined : Number(req.body.channel),
       credentialRef: req.body?.credentialRef,
@@ -152,6 +142,4 @@ app.get('/api/v2/audit', requireAuth, requirePermission('audit.read'), (_req, re
 });
 
 const server = http.createServer(app);
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`AVCLPR v2 foundation API listening on http://localhost:${PORT}`);
-});
+server.listen(PORT, '0.0.0.0', () => console.log(`AVCLPR v2 foundation API listening on http://localhost:${PORT}`));
