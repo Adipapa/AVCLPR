@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'node:http';
 import dotenv from 'dotenv';
+import './src/lib/rbac-policy.js';
 import {
   authenticateToken,
   bootstrapAdmin,
@@ -73,11 +74,6 @@ app.get('/api/v2/health', (_req, res) => {
   res.json({ success: true, system: 'AVCLPR', version: '2-foundation', status: 'online', timestamp: new Date().toISOString() });
 });
 
-/* ---------------------------------------------------------
-   ONE-TIME ADMIN BOOTSTRAP
-   Requires AVCLPR_BOOTSTRAP_SECRET. Never expose that secret
-   to the browser or commit it to the repository.
---------------------------------------------------------- */
 app.post('/api/v2/auth/bootstrap', (req, res) => {
   try {
     const user = bootstrapAdmin({
@@ -106,7 +102,7 @@ app.get('/api/v2/auth/me', requireAuth, (req: AuthenticatedRequest, res) => {
   res.json({ success: true, user: req.user });
 });
 
-app.get('/api/v2/sites', requireAuth, requirePermission('sites.read'), (req: AuthenticatedRequest, res) => {
+app.get('/api/v2/sites', requireAuth, requirePermission('sites.read'), (_req, res) => {
   res.json({ success: true, sites: listSites() });
 });
 
@@ -152,7 +148,6 @@ app.post('/api/v2/cameras', requireAuth, requirePermission('cameras.write'), (re
 });
 
 app.get('/api/v2/audit', requireAuth, requirePermission('audit.read'), (_req, res) => {
-  // Audit querying will be added with the central PostgreSQL repository layer.
   res.json({ success: true, logs: [], note: 'Central audit query is reserved for PostgreSQL.' });
 });
 
