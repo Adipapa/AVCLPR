@@ -1,12 +1,15 @@
 {
   "name": "avclpr1",
-  "version": "1.0.0",
+  "version": "2.0.0-foundation",
   "description": "QTS AI Vehicle Intelligence and License Plate Recognition Platform",
   "main": "server.ts",
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:v2": "tsx server-v2.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "build:v2": "tsc",
+    "start": "node dist/server.js",
+    "start:v2": "node dist/server-v2.js"
   },
   "keywords": [
     "ai",
