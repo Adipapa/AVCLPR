@@ -6,8 +6,9 @@ from pydantic import BaseModel
 from PIL import Image
 
 from .inference import infer, load_model, model_status
+from .plate_ocr import detect_and_read, load_plate_model, plate_model_status
 
-app = FastAPI(title="AVCLPR AI Engine", version="0.2.0")
+app = FastAPI(title="AVCLPR AI Engine", version="0.3.0")
 AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "")
 
 
@@ -17,22 +18,33 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     model_path: str
     model_error: str | None = None
+    plate_model_loaded: bool
+    plate_model_path: str
+    plate_model_error: str | None = None
+    ocr_available: bool
 
 
 @app.on_event("startup")
 def startup() -> None:
     load_model()
+    load_plate_model()
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    status = model_status()
+    vehicle = model_status()
+    plate = plate_model_status()
+    ready = bool(vehicle["loaded"] and plate["loaded"] and plate["ocr_available"])
     return HealthResponse(
-        status="ok" if status["loaded"] else "degraded",
+        status="ok" if ready else "degraded",
         service="ai-engine",
-        model_loaded=bool(status["loaded"]),
-        model_path=str(status["model_path"]),
-        model_error=status["error"],
+        model_loaded=bool(vehicle["loaded"]),
+        model_path=str(vehicle["model_path"]),
+        model_error=vehicle["error"],
+        plate_model_loaded=bool(plate["loaded"]),
+        plate_model_path=str(plate["model_path"]),
+        plate_model_error=plate["error"],
+        ocr_available=bool(plate["ocr_available"]),
     )
 
 
@@ -41,10 +53,29 @@ def require_service_token(x_ai_service_token: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid AI service token")
 
 
+async def read_image(image: UploadFile) -> Image.Image:
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=415, detail="An image upload is required")
+    payload = await image.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Empty image payload")
+    try:
+        return Image.open(BytesIO(payload)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to decode image: {exc}") from exc
+
+
 @app.post("/v1/inference/validate")
 def validate_inference(x_ai_service_token: str | None = Header(default=None)):
     require_service_token(x_ai_service_token)
-    return {"accepted": True, "inference_ready": bool(model_status()["loaded"])}
+    vehicle = model_status()
+    plate = plate_model_status()
+    return {
+        "accepted": True,
+        "vehicle_inference_ready": bool(vehicle["loaded"]),
+        "plate_detection_ready": bool(plate["loaded"]),
+        "ocr_ready": bool(plate["ocr_available"]),
+    }
 
 
 @app.post("/v1/inference/vehicles")
@@ -52,31 +83,60 @@ async def vehicle_inference(
     image: UploadFile = File(...),
     x_ai_service_token: str | None = Header(default=None),
 ):
-    """Run first-stage YOLO vehicle detection on one image frame.
-
-    Tracking, plate detection/OCR, watchlists and event persistence are
-    separate stages and will consume these detections next.
-    """
     require_service_token(x_ai_service_token)
-
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(status_code=415, detail="An image upload is required")
-
-    payload = await image.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail="Empty image payload")
-
+    frame = await read_image(image)
     try:
-        frame = Image.open(BytesIO(payload))
         detections = infer(frame)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to process image: {exc}") from exc
-
     return {
         "success": True,
         "model": model_status()["model_path"],
         "count": len(detections),
         "detections": detections,
+    }
+
+
+@app.post("/v1/inference/plates")
+async def plate_inference(
+    image: UploadFile = File(...),
+    x_ai_service_token: str | None = Header(default=None),
+):
+    """Detect number plates and run OCR on each detected plate crop."""
+    require_service_token(x_ai_service_token)
+    frame = await read_image(image)
+    try:
+        detections = detect_and_read(frame)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "plate_model": plate_model_status()["model_path"],
+        "count": len(detections),
+        "detections": detections,
+    }
+
+
+@app.post("/v1/inference/vehicle-with-plate")
+async def vehicle_with_plate_inference(
+    image: UploadFile = File(...),
+    x_ai_service_token: str | None = Header(default=None),
+):
+    """Run vehicle detection followed by plate detection/OCR on the frame."""
+    require_service_token(x_ai_service_token)
+    frame = await read_image(image)
+    try:
+        vehicles = infer(frame)
+        plates = detect_and_read(frame)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "success": True,
+        "vehicle_model": model_status()["model_path"],
+        "plate_model": plate_model_status()["model_path"],
+        "vehicles": vehicles,
+        "vehicle_count": len(vehicles),
+        "plates": plates,
+        "plate_count": len(plates),
     }
