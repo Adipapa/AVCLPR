@@ -1,0 +1,15 @@
+{
+  "pilot": "AVCLPR-10-SITE",
+  "sites": [
+    { "siteCode": "HWY-01", "name": "Highway Pilot Location 01" },
+    { "siteCode": "HWY-02", "name": "Highway Pilot Location 02" },
+    { "siteCode": "HWY-03", "name": "Highway Pilot Location 03" },
+    { "siteCode": "HWY-04", "name": "Highway Pilot Location 04" },
+    { "siteCode": "HWY-05", "name": "Highway Pilot Location 05" },
+    { "siteCode": "HWY-06", "name": "Highway Pilot Location 06" },
+    { "siteCode": "HWY-07", "name": "Highway Pilot Location 07" },
+    { "siteCode": "HWY-08", "name": "Highway Pilot Location 08" },
+    { "siteCode": "HWY-09", "name": "Highway Pilot Location 09" },
+    { "siteCode": "HWY-10", "name": "Highway Pilot Location 10" }
+  ]
+}
