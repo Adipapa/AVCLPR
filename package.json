@@ -5,11 +5,11 @@
   "main": "server.ts",
   "scripts": {
     "dev": "tsx server.ts",
-    "dev:v2": "tsx server-v2.ts",
+    "dev:v2": "tsx --import dotenv/config server-v2.ts",
     "build": "tsc",
     "build:v2": "tsc",
     "start": "node dist/server.js",
-    "start:v2": "node dist/server-v2.js"
+    "start:v2": "node --import dotenv/config dist/server-v2.js"
   },
   "keywords": [
     "ai",
