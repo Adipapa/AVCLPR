@@ -4,7 +4,7 @@ Python inference service for edge AI processing.
 
 ## Current pipeline
 
-RTSP frame -> frame sampler -> vehicle detector -> plate detector -> OCR -> event builder -> API/event queue.
+RTSP frame -> frame sampler -> vehicle detector -> persistent tracker -> plate detector -> OCR -> plate/vehicle association -> deduplicated vehicle event -> watchlist matching -> alert generation -> evidence hashing/storage -> authenticated event API.
 
 ## Models
 
@@ -15,13 +15,31 @@ Place the model weights under `services/ai-engine/models/` or configure absolute
 
 The repository does not include model weights.
 
-## Current endpoints
+## Endpoints
 
 - `GET /health`
 - `POST /v1/inference/validate`
 - `POST /v1/inference/vehicles`
 - `POST /v1/inference/plates`
 - `POST /v1/inference/vehicle-with-plate`
+- `POST /v1/inference/tracked-frame`
+- `POST /v1/events/process-frame` — complete edge pipeline
+- `GET /v1/watchlists`
+- `POST /v1/watchlists`
+- `DELETE /v1/watchlists/{plate}`
+- `POST /v1/tracker/reset`
+
+## Event pipeline behavior
+
+- Vehicle tracks receive persistent IDs and are retained through short detection gaps.
+- Plate reads are associated with the best active vehicle using bounding-box geometry.
+- OCR readings below `OCR_CONFIDENCE_THRESHOLD` are not attached to a track.
+- Events require a minimum number of observed frames before creation.
+- Repeated observations are deduplicated for `EVENT_DEDUP_SECONDS`.
+- Watchlist matches are exact normalized-plate matches.
+- Watchlist categories generate alert severity; this is an operational alert signal, not an automatic enforcement decision.
+- Evidence is written to `EVIDENCE_ROOT` and SHA-256 hashed.
+- The edge watchlist is intentionally in-memory. PostgreSQL remains the authoritative production store and synchronization is a later platform phase.
 
 ## Configuration
 
@@ -34,21 +52,29 @@ The repository does not include model weights.
 - `PLATE_IMAGE_SIZE`
 - `OCR_PSM`
 - `AI_SERVICE_TOKEN`
+- `TRACKER_IOU_THRESHOLD`
+- `TRACKER_MAX_MISSED_FRAMES`
+- `PLATE_ASSOC_IOU_THRESHOLD`
+- `PLATE_ASSOC_CENTER_DISTANCE`
+- `EVENT_MIN_FRAMES`
+- `EVENT_DEDUP_SECONDS`
+- `EVENT_MAX_RECENT_EVENTS`
+- `EVIDENCE_ROOT`
 
 ## OCR requirement
 
 `pytesseract` is the Python wrapper. The deployment host/container must also have the **Tesseract OCR executable** installed. The Python package alone is not sufficient.
 
-## Production requirements
+## Production requirements / limitations
 
 - GPU acceleration where available.
 - Explicit model versioning.
-- Configurable confidence thresholds.
 - Bounded frame queues and backpressure.
-- Health endpoint.
-- Graceful shutdown.
-- No direct database writes to the central database from the inference process.
-- AI events submitted through the authenticated API/event contract.
+- Central PostgreSQL persistence and edge synchronization.
+- Durable watchlists and alert records.
+- Camera/site-specific direction calibration or virtual-line logic.
+- Validated speed estimation before exposing speed as an enforcement measurement.
+- Evidence retention/deletion jobs and controlled evidence access.
 - Validation using representative Gambian road footage, including day/night, blur, rain and oblique plate angles.
 
 OCR output must not automatically be treated as a legally valid plate reading. Plate-format validation, confidence handling and human-review rules must be established before operational use.
