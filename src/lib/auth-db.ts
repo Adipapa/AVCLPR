@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -107,7 +108,7 @@ export function seedSuperAdmin(): {
   }
 
   const now = new Date().toISOString();
-  const id = `user_${crypto.randomUUID()}`;
+  const id = `user_${randomUUID()}`;
   const passwordHash = bcrypt.hashSync(password, 12);
 
   authDb
