@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "dev:v2": "tsx --import dotenv/config server-v2.ts",
+    "seed:superadmin": "tsx scripts/seed-superadmin.ts",
     "build": "tsc",
     "build:v2": "tsc",
     "start": "node dist/server.js",
