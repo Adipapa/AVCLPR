@@ -19,6 +19,8 @@ from .tracker import VehicleTracker
 
 app = FastAPI(title="AVCLPR AI Engine", version="0.9.0")
 AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "")
+PRODUCTION = os.getenv("ENVIRONMENT", os.getenv("NODE_ENV", "development")).lower() == "production"
+MAX_IMAGE_BYTES = int(os.getenv("AI_MAX_IMAGE_BYTES", str(8 * 1024 * 1024)))
 tracker = VehicleTracker()
 watchlists = WatchlistMatcher()
 events = EventBuilder(watchlists)
@@ -55,7 +57,9 @@ def shutdown() -> None:
 
 
 def require_service_token(x_ai_service_token: str | None) -> None:
-    if AI_SERVICE_TOKEN and x_ai_service_token != AI_SERVICE_TOKEN:
+    if PRODUCTION and not AI_SERVICE_TOKEN:
+        raise HTTPException(status_code=503, detail="AI service authentication is not configured")
+    if not AI_SERVICE_TOKEN or x_ai_service_token != AI_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid AI service token")
 
 
@@ -77,7 +81,9 @@ def health():
 async def read_image(image: UploadFile) -> tuple[Image.Image, bytes]:
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=415, detail="An image upload is required")
-    payload = await image.read()
+    payload = await image.read(MAX_IMAGE_BYTES + 1)
+    if len(payload) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image payload exceeds the configured limit")
     if not payload:
         raise HTTPException(status_code=400, detail="Empty image payload")
     try:
