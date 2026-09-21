@@ -302,4 +302,11 @@ export async function updateWatchlist(id:string,input:any){
 }
 export async function deleteWatchlist(id:string){await pool.query('UPDATE watchlists SET active=false,updated_at=now() WHERE id=$1',[id]);}
 export async function listSessions(userId:string){return (await pool.query('SELECT id,ip_address,user_agent,created_at,last_seen_at,expires_at,revoked_at,revoked_reason FROM user_sessions WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows;}
+export async function getEvidence(id:string){
+  const r=await pool.query('SELECT e.*,v.site_id FROM evidence e JOIN vehicle_events v ON v.id=e.event_id WHERE e.id=$1 LIMIT 1',[id]);
+  return r.rows[0]||null;
+}
+export async function recordEvidenceAccess(evidenceId:string,userId:string,action:string,ip?:string,userAgent?:string,purpose?:string){
+  await pool.query('INSERT INTO evidence_access_logs(evidence_id,user_id,action,ip_address,user_agent,purpose) VALUES($1,$2,$3,$4,$5,$6)',[evidenceId,userId,action,ip||null,userAgent||null,purpose||null]);
+}
 export async function health(){const r=await pool.query('SELECT now() AS database_time');return {database:'postgresql',connected:true,databaseTime:r.rows[0].database_time};}
