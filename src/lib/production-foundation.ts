@@ -309,4 +309,14 @@ export async function getEvidence(id:string){
 export async function recordEvidenceAccess(evidenceId:string,userId:string,action:string,ip?:string,userAgent?:string,purpose?:string){
   await pool.query('INSERT INTO evidence_access_logs(evidence_id,user_id,action,ip_address,user_agent,purpose) VALUES($1,$2,$3,$4,$5,$6)',[evidenceId,userId,action,ip||null,userAgent||null,purpose||null]);
 }
+export async function metrics(){
+  const [users,sessions,events,alerts,auditRows]=await Promise.all([
+    pool.query('SELECT COUNT(*)::int AS n FROM users WHERE active=true'),
+    pool.query('SELECT COUNT(*)::int AS n FROM user_sessions WHERE revoked_at IS NULL AND expires_at>now()'),
+    pool.query('SELECT COUNT(*)::bigint AS n FROM vehicle_events'),
+    pool.query('SELECT COUNT(*)::int AS n FROM alerts WHERE status=\'active\''),
+    pool.query('SELECT COUNT(*)::bigint AS n FROM audit_logs WHERE created_at>now()-interval \'24 hours\'')
+  ]);
+  return {users:users.rows[0].n,activeSessions:sessions.rows[0].n,vehicleEvents:events.rows[0].n,activeAlerts:alerts.rows[0].n,auditEvents24h:auditRows.rows[0].n};
+}
 export async function health(){const r=await pool.query('SELECT now() AS database_time');return {database:'postgresql',connected:true,databaseTime:r.rows[0].database_time};}
