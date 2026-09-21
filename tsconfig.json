@@ -12,11 +12,12 @@
     "sourceMap": true
   },
   "include": [
-    "server.ts",
+    "server-v2.ts",
     "src/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "dist"
+    "dist",
+    "server.ts"
   ]
 }

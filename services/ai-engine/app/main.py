@@ -19,6 +19,8 @@ from .tracker import VehicleTracker
 
 app = FastAPI(title="AVCLPR AI Engine", version="0.9.0")
 AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "")
+PRODUCTION = os.getenv("ENVIRONMENT", os.getenv("NODE_ENV", "development")).lower() == "production"
+MAX_IMAGE_BYTES = int(os.getenv("AI_MAX_IMAGE_BYTES", str(8 * 1024 * 1024)))
 tracker = VehicleTracker()
 watchlists = WatchlistMatcher()
 events = EventBuilder(watchlists)
@@ -55,29 +57,34 @@ def shutdown() -> None:
 
 
 def require_service_token(x_ai_service_token: str | None) -> None:
-    if AI_SERVICE_TOKEN and x_ai_service_token != AI_SERVICE_TOKEN:
+    if PRODUCTION and not AI_SERVICE_TOKEN:
+        raise HTTPException(status_code=503, detail="AI service authentication is not configured")
+    if not AI_SERVICE_TOKEN or x_ai_service_token != AI_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid AI service token")
 
 
 @app.get("/health")
-def health():
+def health(x_ai_service_token: str | None = Header(default=None)):
+    require_service_token(x_ai_service_token)
     vehicle = model_status()
     plate = plate_model_status()
     ready = bool(vehicle["loaded"] and plate["loaded"] and plate["ocr_available"])
     return {
-        "status": "ok" if ready else "degraded", "service": "ai-engine", "version": "0.9.0",
-        "vehicle_model": vehicle, "plate_model": plate,
-        "tracker": {"active_tracks": len(tracker._tracks)},
-        "event_pipeline": {"recent_dedup_keys": events.recent_keys()},
-        "camera_workers": {"count": cameras.count(), "items": cameras.status()},
-        "central_store": central.health(), "sync": sync_service.status(),
+        "status": "ok" if ready else "degraded",
+        "service": "ai-engine",
+        "version": "0.9.0",
+        "models_ready": ready,
+        "camera_workers": {"count": cameras.count()},
+        "sync": {"running": sync_service.status().get("running", False)},
     }
 
 
 async def read_image(image: UploadFile) -> tuple[Image.Image, bytes]:
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=415, detail="An image upload is required")
-    payload = await image.read()
+    payload = await image.read(MAX_IMAGE_BYTES + 1)
+    if len(payload) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image payload exceeds the configured limit")
     if not payload:
         raise HTTPException(status_code=400, detail="Empty image payload")
     try:
