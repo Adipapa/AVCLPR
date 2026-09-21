@@ -16,6 +16,8 @@ const PORT = Number(process.env.V2_PORT || 3100);
 const AI_SERVICE_URL = (process.env.AI_SERVICE_URL || 'http://localhost:8000').replace(/\/$/, '');
 const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN || '';
 const REQUIRE_HTTPS = process.env.REQUIRE_HTTPS === 'true';
+const authRate = new Map<string,{count:number;reset:number}>();
+function allowAuthAttempt(ip:string,limit=20,windowMs=10*60*1000){ const now=Date.now(); const row=authRate.get(ip); if(!row||row.reset<now){authRate.set(ip,{count:1,reset:now+windowMs});return true;} if(row.count>=limit)return false; row.count++; return true; }
 
 if (process.env.NODE_ENV === 'production' && !AI_SERVICE_TOKEN) {
   throw new Error('AI_SERVICE_TOKEN is mandatory in production.');
@@ -121,6 +123,7 @@ app.get('/api/v2/health',async(_req,res)=>{
 
 app.post('/api/v2/auth/login',async(req,res)=>{
   try{
+    if(!allowAuthAttempt(req.ip,20)) return res.status(429).json({success:false,error:'Too many authentication attempts. Try again later.'});
     const username=validateString(req.body?.username,'Username',3,80);
     const password=validateString(req.body?.password,'Password',12,256);
     const result=await login(username,password,req.ip,req.header('user-agent'));
@@ -133,11 +136,11 @@ app.post('/api/v2/auth/mfa/setup',async(req,res)=>{
   try{const result=await setupMfa(validateString(req.body?.setupToken,'Setup token',40,200));if(!result)return res.status(401).json({success:false,error:'Invalid or expired setup token.'});return res.json({success:true,...result});}catch(e){return error(res,e);}
 });
 
-app.post('/api/v2/auth/mfa/verify',async(req,res)=>{
+app.post('/api/v2/auth/mfa/verify',async(req,res)=>{\n  if(!allowAuthAttempt(req.ip,10,5*60*1000)) return res.status(429).json({success:false,error:'Too many MFA attempts. Try again later.'});
   try{const result=await enableMfa(validateString(req.body?.setupToken,'Setup token',40,200),validateString(req.body?.code,'MFA code',6,6),req.ip,req.header('user-agent'));if(!result)return res.status(401).json({success:false,error:'Invalid or expired MFA code.'});return res.json({success:true,...result});}catch(e){return error(res,e);}
 });
 
-app.post('/api/v2/auth/mfa/challenge',async(req,res)=>{
+app.post('/api/v2/auth/mfa/challenge',async(req,res)=>{\n  if(!allowAuthAttempt(req.ip,10,5*60*1000)) return res.status(429).json({success:false,error:'Too many MFA attempts. Try again later.'});
   try{const result=await completeMfa(validateString(req.body?.challengeToken,'Challenge token',40,200),validateString(req.body?.code,'MFA code',6,6),req.ip,req.header('user-agent'));if(!result)return res.status(401).json({success:false,error:'Invalid or expired MFA code.'});return res.json({success:true,...result});}catch(e){return error(res,e);}
 });
 
