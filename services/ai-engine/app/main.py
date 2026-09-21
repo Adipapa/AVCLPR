@@ -64,17 +64,18 @@ def require_service_token(x_ai_service_token: str | None) -> None:
 
 
 @app.get("/health")
-def health():
+def health(x_ai_service_token: str | None = Header(default=None)):
+    require_service_token(x_ai_service_token)
     vehicle = model_status()
     plate = plate_model_status()
     ready = bool(vehicle["loaded"] and plate["loaded"] and plate["ocr_available"])
     return {
-        "status": "ok" if ready else "degraded", "service": "ai-engine", "version": "0.9.0",
-        "vehicle_model": vehicle, "plate_model": plate,
-        "tracker": {"active_tracks": len(tracker._tracks)},
-        "event_pipeline": {"recent_dedup_keys": events.recent_keys()},
-        "camera_workers": {"count": cameras.count(), "items": cameras.status()},
-        "central_store": central.health(), "sync": sync_service.status(),
+        "status": "ok" if ready else "degraded",
+        "service": "ai-engine",
+        "version": "0.9.0",
+        "models_ready": ready,
+        "camera_workers": {"count": cameras.count()},
+        "sync": {"running": sync_service.status().get("running", False)},
     }
 
 
