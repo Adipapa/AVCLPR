@@ -59,8 +59,8 @@ jobs:
       - name: Restore
         env:
           DATABASE_URL: postgresql://avclpr:avclpr_test@localhost:5432/avclpr
-          BACKUP_FILE: /tmp/avclpr-backup/$(ls /tmp/avclpr-backup/*.dump | xargs -n1 basename)
         run: |
+          BACKUP_FILE="$(ls /tmp/avclpr-backup/*.dump | head -n1)"
           psql "$DATABASE_URL" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
           pg_restore --clean --if-exists --no-owner --no-privileges --dbname="$DATABASE_URL" "$BACKUP_FILE"
           test "$(psql "$DATABASE_URL" -tAc 'select count(*) from users')" -ge 1
