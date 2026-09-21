@@ -137,7 +137,8 @@ app.post('/api/v2/auth/mfa/setup',async(req,res)=>{
   try{const result=await setupMfa(validateString(req.body?.setupToken,'Setup token',40,200));if(!result)return res.status(401).json({success:false,error:'Invalid or expired setup token.'});return res.json({success:true,...result});}catch(e){return error(res,e);}
 });
 
-app.post('/api/v2/auth/mfa/verify',async(req,res)=>{\n  if(!allowAuthAttempt(req.ip,10,5*60*1000)) return res.status(429).json({success:false,error:'Too many MFA attempts. Try again later.'});
+app.post('/api/v2/auth/mfa/verify',async(req,res)=>{
+  if(!allowAuthAttempt(req.ip,10,5*60*1000)) return res.status(429).json({success:false,error:'Too many MFA attempts. Try again later.'});
   try{const result=await enableMfa(validateString(req.body?.setupToken,'Setup token',40,200),validateString(req.body?.code,'MFA code',6,6),req.ip,req.header('user-agent'));if(!result)return res.status(401).json({success:false,error:'Invalid or expired MFA code.'});return res.json({success:true,...result});}catch(e){return error(res,e);}
 });
 
