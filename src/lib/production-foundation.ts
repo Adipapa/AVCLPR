@@ -277,4 +277,29 @@ export async function listAuditLogs(input:any={}){const limit=Math.min(Math.max(
 
 export async function audit(input:any){ await pool.query('INSERT INTO audit_logs(user_id,action,resource_type,resource_id,site_id,ip_address,user_agent,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[input.userId||null,input.action,input.resourceType||null,input.resourceId||null,input.siteId||null,input.ipAddress||null,input.userAgent||null,input.metadata||null]); }
 
+export async function updateCamera(id:string,input:any){
+  const fields:string[]=[];const args:any[]=[];let n=1;
+  for(const [key,column] of [['name','name'],['host','host'],['rtspPort','rtsp_port'],['channel','channel'],['credentialRef','credential_ref'],['mainStream','main_stream'],['aiStream','ai_stream'],['previewStream','preview_stream'],['status','status']] as const){
+    if(input[key]!==undefined){fields.push(`${column}=${n++}`);args.push(input[key]);}
+  }
+  if(!fields.length)return (await pool.query('SELECT * FROM cameras WHERE id=$1',[id])).rows[0];
+  args.push(id);return (await pool.query(`UPDATE cameras SET ${fields.join(',')},updated_at=now() WHERE id=${n} RETURNING *`,args)).rows[0];
+}
+export async function deleteCamera(id:string){await pool.query('DELETE FROM cameras WHERE id=$1',[id]);}
+export async function listWatchlists(){return (await pool.query('SELECT * FROM watchlists WHERE active=true ORDER BY normalized_plate')).rows;}
+export async function createWatchlist(input:any,userId:string){
+  const normalized=String(input.plateNumber||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(!normalized)throw new Error('A valid plate number is required.');
+  const r=await pool.query('INSERT INTO watchlists(plate_number,normalized_plate,category,description,vehicle_type,owner_name,notes,alert_enabled,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[String(input.plateNumber).trim().toUpperCase(),normalized,String(input.category||'GENERAL').toUpperCase(),input.description||null,input.vehicleType||null,input.ownerName||null,input.notes||null,input.alertEnabled!==false,userId]);
+  return r.rows[0];
+}
+export async function updateWatchlist(id:string,input:any){
+  const fields:string[]=[];const args:any[]=[];let n=1;
+  if(input.plateNumber!==undefined){const normalized=String(input.plateNumber).toUpperCase().replace(/[^A-Z0-9]/g,'');fields.push(`plate_number=${n++}`,`normalized_plate=${n++}`);args.push(String(input.plateNumber).trim().toUpperCase(),normalized);}
+  for(const [key,column] of [['category','category'],['description','description'],['vehicleType','vehicle_type'],['ownerName','owner_name'],['notes','notes'],['alertEnabled','alert_enabled'],['active','active']] as const){if(input[key]!==undefined){fields.push(`${column}=${n++}`);args.push(input[key]);}}
+  if(!fields.length)return (await pool.query('SELECT * FROM watchlists WHERE id=$1',[id])).rows[0];
+  args.push(id);return (await pool.query(`UPDATE watchlists SET ${fields.join(',')},updated_at=now() WHERE id=${n} RETURNING *`,args)).rows[0];
+}
+export async function deleteWatchlist(id:string){await pool.query('UPDATE watchlists SET active=false,updated_at=now() WHERE id=$1',[id]);}
+export async function listSessions(userId:string){return (await pool.query('SELECT id,ip_address,user_agent,created_at,last_seen_at,expires_at,revoked_at,revoked_reason FROM user_sessions WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows;}
 export async function health(){const r=await pool.query('SELECT now() AS database_time');return {database:'postgresql',connected:true,databaseTime:r.rows[0].database_time};}
