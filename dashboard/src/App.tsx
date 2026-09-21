@@ -27,19 +27,41 @@ async function api(path: string, options: RequestInit = {}, token?: string) {
 }
 
 function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const submit = async (event: FormEvent) => {
-    event.preventDefault(); setError('');
-    try {
-      const result = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
-      onLogin(result.token, result.user);
-    } catch (e) { setError(e instanceof Error ? e.message : 'Login failed'); }
+  const [username,setUsername]=useState(''); const [password,setPassword]=useState(''); const [code,setCode]=useState('');
+  const [setupToken,setSetupToken]=useState(''); const [challengeToken,setChallengeToken]=useState(''); const [secret,setSecret]=useState('');
+  const [step,setStep]=useState<'password'|'setup'|'mfa'>('password'); const [error,setError]=useState('');
+  const submit=async(event:FormEvent)=>{event.preventDefault();setError('');
+    try{
+      if(step==='password'){
+        const result=await api('/auth/login',{method:'POST',body:JSON.stringify({username,password})});
+        if(result.token){onLogin(result.token,result.user);return;}
+        if(result.mfaSetupRequired){
+          setSetupToken(result.setupToken);
+          const setup=await api('/auth/mfa/setup',{method:'POST',body:JSON.stringify({setupToken:result.setupToken})});
+          setSecret(setup.secret); setStep('setup'); return;
+        }
+        if(result.mfaRequired){setChallengeToken(result.challengeToken);setStep('mfa');return;}
+      }else if(step==='setup'){
+        const result=await api('/auth/mfa/verify',{method:'POST',body:JSON.stringify({setupToken,code})});
+        onLogin(result.token,result.user);
+      }else{
+        const result=await api('/auth/mfa/challenge',{method:'POST',body:JSON.stringify({challengeToken,code})});
+        onLogin(result.token,result.user);
+      }
+    }catch(e){setError(e instanceof Error?e.message:'Authentication failed');}
   };
   return <div className="login-shell">
     <div className="login-art"><div className="radar"/><div className="login-grid"/><div className="login-art-content"><div className="brand-mark"><Shield size={22}/> QTS</div><h1>National Vehicle<br/><span>Intelligence</span> Platform</h1><p>AI-powered highway monitoring, vehicle intelligence and road safety operations.</p><div className="login-status"><span className="pulse"/> SECURE GOVERNMENT OPERATIONS</div></div></div>
-    <form onSubmit={submit} className="login-card"><div className="mobile-brand"><Shield size={20}/> QTS AVCLPR</div><div className="eyebrow">SECURE ACCESS</div><h2>Sign in to Command Center</h2><p className="muted">Authorized personnel only. Activity is logged and audited.</p><label>Username<input placeholder="Enter username" value={username} onChange={e => setUsername(e.target.value)} autoComplete="username"/></label><label>Password<input placeholder="Enter password" type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password"/></label><button className="primary full-btn">SIGN IN <span>→</span></button>{error && <div className="form-error"><AlertTriangle size={15}/>{error}</div>}<div className="login-footer"><span>QTS · AVCLPR</span><span>Secure session</span></div></form>
+    <form onSubmit={submit} className="login-card"><div className="mobile-brand"><Shield size={20}/> QTS AVCLPR</div><div className="eyebrow">SECURE ACCESS</div>
+      <h2>{step==='password'?'Sign in to Command Center':step==='setup'?'Set up MFA':'Verify MFA'}</h2>
+      <p className="muted">{step==='setup'?'Add the secret to an authenticator app, then enter its six-digit code.':'Authorized personnel only. Activity is logged and audited.'}</p>
+      {step==='password'&&<><label>Username<input placeholder="Enter username" value={username} onChange={e=>setUsername(e.target.value)} autoComplete="username"/></label><label>Password<input placeholder="Enter password" type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password"/></label></>}
+      {step==='setup'&&<><label>Authenticator secret<input value={secret} readOnly/></label><label>6-digit code<input inputMode="numeric" maxLength={6} value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,''))}/></label></>}
+      {step==='mfa'&&<label>Authenticator code<input autoFocus inputMode="numeric" maxLength={6} value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,''))}/></label>}
+      <button className="primary full-btn">{step==='password'?'SIGN IN':step==='setup'?'ENABLE MFA':'VERIFY MFA'} <span>→</span></button>
+      {error&&<div className="form-error"><AlertTriangle size={15}/>{error}</div>}
+      {step!=='password'&&<button type="button" className="secondary" onClick={()=>setStep('password')}>BACK</button>}
+    </form>
   </div>;
 }
 
