@@ -6,7 +6,6 @@ import {
   VehicleEvent,
 } from '../types/index.js';
 
-import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'fs';
 import path from 'path';
@@ -92,66 +91,9 @@ db.exec(`
 `);
 
 /* =========================================================
-   CAMERAS
+   Legacy runtime state removed.
+   Camera/user configuration is now PostgreSQL-authoritative.
 ========================================================= */
-
-export const cameras: Camera[] = [
-  {
-    id: 'cam_lorex_01',
-
-    name:
-      'Lorex Highway Camera 01',
-
-    ip:
-      '192.168.0.100',
-
-    rtspPort:
-      554,
-
-    username:
-      'admin',
-
-    hasPassword:
-      !!process.env.LOREX_PASSWORD,
-
-    location:
-      'Highway Monitoring Point 01',
-
-    status:
-      'offline',
-
-    statusMessage:
-      'Camera not tested yet.',
-
-    streams: {},
-  },
-];
-
-/* =========================================================
-   USERS
-========================================================= */
-
-export const users: User[] = [
-  {
-    id:
-      'user_admin',
-
-    username:
-      'admin',
-
-    name:
-      'System Administrator',
-
-    role:
-      'admin',
-
-    passwordHash:
-      bcrypt.hashSync(
-        'admin123',
-        10
-      ),
-  },
-];
 
 /* =========================================================
    WATCHLIST
