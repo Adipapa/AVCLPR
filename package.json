@@ -10,7 +10,8 @@
     "build": "tsc",
     "build:v2": "tsc",
     "start": "node dist/server.js",
-    "start:v2": "node --import dotenv/config dist/server-v2.js"
+    "start:v2": "node --import dotenv/config dist/server-v2.js",
+    "db:migrate": "tsx scripts/migrate-postgres.ts"
   },
   "keywords": [
     "ai",
@@ -28,13 +29,15 @@
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@types/pg": "^8.15.5"
   }
 }
