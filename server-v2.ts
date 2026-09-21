@@ -46,6 +46,7 @@ app.use((req,res,next) => {
   res.setHeader('X-Frame-Options','DENY');
   res.setHeader('Referrer-Policy','no-referrer');
   res.setHeader('Permissions-Policy','camera=(),microphone=(),geolocation=()');
+  res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self' https:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
   res.setHeader('Cache-Control','no-store');
   if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security','max-age=31536000; includeSubDomains');
   if(req.method==='OPTIONS') return res.sendStatus(204);
