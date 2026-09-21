@@ -269,7 +269,7 @@ export async function updateUser(id:string,input:any){
   args.push(id);return (await pool.query(`UPDATE users SET ${fields.join(',')},updated_at=now() WHERE id=$${n} RETURNING id,username,display_name,active,mfa_enabled`,args)).rows[0];
 }
 
-export async function setUserSiteAccess(userId:string,siteIds:string[]){ await pool.query('BEGIN'); try{await pool.query('DELETE FROM user_site_access WHERE user_id=$1',[userId]);for(const siteId of siteIds)await pool.query('INSERT INTO user_site_access(user_id,site_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[userId,siteId]);await pool.query('COMMIT');}catch(e){await pool.query('ROLLBACK');throw e;} }
+export async function setUserSiteAccess(userId:string,siteIds:string[]){ const client=await pool.connect(); try{await client.query('BEGIN');await client.query('DELETE FROM user_site_access WHERE user_id=$1',[userId]);for(const siteId of siteIds)await client.query('INSERT INTO user_site_access(user_id,site_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[userId,siteId]);await client.query('COMMIT');}catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();} }
 
 export async function listUserSiteAccess(userId:string){ return (await pool.query('SELECT site_id FROM user_site_access WHERE user_id=$1',[userId])).rows.map(x=>x.site_id); }
 
