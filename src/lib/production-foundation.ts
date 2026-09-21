@@ -1,18 +1,8 @@
-import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash, createCipheriv, createDecipheriv, createHmac, timingSafeEqual } from 'node:crypto';
+import { Pool } from 'pg';
 import bcrypt from 'bcryptjs';
-import { db } from './server-db.js';
 
-export type RoleCode =
-  | 'SUPER_ADMIN'
-  | 'NATIONAL_ADMIN'
-  | 'POLICE'
-  | 'TRANSPORT'
-  | 'PURA'
-  | 'GICTA'
-  | 'INTELLIGENCE'
-  | 'ANALYST'
-  | 'OPERATOR'
-  | 'VIEW_ONLY';
+export type RoleCode = 'SUPER_ADMIN'|'NATIONAL_ADMIN'|'POLICE'|'TRANSPORT'|'PURA'|'GICTA'|'INTELLIGENCE'|'ANALYST'|'OPERATOR'|'VIEW_ONLY';
 
 export interface AuthUser {
   id: string;
@@ -20,300 +10,271 @@ export interface AuthUser {
   displayName: string;
   role: RoleCode;
   active: boolean;
+  mfaEnabled: boolean;
 }
 
-const JWT_SECRET = process.env.AVCLPR_AUTH_SECRET || '';
-const BOOTSTRAP_SECRET = process.env.AVCLPR_BOOTSTRAP_SECRET || '';
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const AUTH_SECRET = process.env.AVCLPR_AUTH_SECRET || '';
+const MFA_KEY_SOURCE = process.env.AVCLPR_MFA_ENCRYPTION_KEY || AUTH_SECRET;
+const SESSION_HOURS = Number(process.env.AVCLPR_SESSION_HOURS || 8);
+const IDLE_MINUTES = Number(process.env.AVCLPR_SESSION_IDLE_MINUTES || 30);
 
-if (!JWT_SECRET || JWT_SECRET.length < 32) {
-  console.warn('[SECURITY] AVCLPR_AUTH_SECRET must be configured with at least 32 characters.');
+if (process.env.NODE_ENV === 'production') {
+  if (!DATABASE_URL) throw new Error('DATABASE_URL is required in production.');
+  if (AUTH_SECRET.length < 32) throw new Error('AVCLPR_AUTH_SECRET must be at least 32 characters.');
+  if (!process.env.AVCLPR_MFA_ENCRYPTION_KEY) throw new Error('AVCLPR_MFA_ENCRYPTION_KEY is required in production.');
 }
 
-/* ---------------------------------------------------------
-   CONTROL-PLANE TABLES
-   These tables are suitable for an edge/pilot SQLite node.
-   The canonical central production schema is PostgreSQL.
---------------------------------------------------------- */
+export const pool = new Pool({
+  connectionString: DATABASE_URL || undefined,
+  max: Number(process.env.PG_POOL_MAX || 20),
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: process.env.PGSSL_REJECT_UNAUTHORIZED !== 'false' } : undefined,
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS avclpr_sites (
-    id TEXT PRIMARY KEY,
-    site_code TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    road TEXT,
-    direction TEXT,
-    jurisdiction TEXT,
-    latitude REAL,
-    longitude REAL,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS avclpr_cameras (
-    id TEXT PRIMARY KEY,
-    site_id TEXT NOT NULL,
-    camera_code TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    rtsp_port INTEGER NOT NULL DEFAULT 554,
-    channel INTEGER NOT NULL DEFAULT 1,
-    credential_ref TEXT,
-    status TEXT NOT NULL DEFAULT 'offline',
-    last_seen_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(site_id) REFERENCES avclpr_sites(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_avclpr_cameras_site ON avclpr_cameras(site_id);
-
-  CREATE TABLE IF NOT EXISTS avclpr_roles (
-    code TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS avclpr_permissions (
-    code TEXT PRIMARY KEY,
-    description TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS avclpr_role_permissions (
-    role_code TEXT NOT NULL,
-    permission_code TEXT NOT NULL,
-    PRIMARY KEY(role_code, permission_code)
-  );
-
-  CREATE TABLE IF NOT EXISTS avclpr_users (
-    id TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    role_code TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    failed_login_count INTEGER NOT NULL DEFAULT 0,
-    locked_until TEXT,
-    last_login_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS avclpr_user_site_access (
-    user_id TEXT NOT NULL,
-    site_id TEXT NOT NULL,
-    PRIMARY KEY(user_id, site_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS avclpr_audit_logs (
-    id TEXT PRIMARY KEY,
-    user_id TEXT,
-    action TEXT NOT NULL,
-    resource_type TEXT,
-    resource_id TEXT,
-    site_id TEXT,
-    ip_address TEXT,
-    user_agent TEXT,
-    metadata_json TEXT,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_avclpr_audit_created ON avclpr_audit_logs(created_at);
-`);
-
-const roles: Array<[RoleCode, string]> = [
-  ['SUPER_ADMIN', 'Super Administrator'],
-  ['NATIONAL_ADMIN', 'National Administrator'],
-  ['POLICE', 'Police'],
-  ['TRANSPORT', 'Transport'],
-  ['PURA', 'PURA'],
-  ['GICTA', 'GICTA'],
-  ['INTELLIGENCE', 'Intelligence'],
-  ['ANALYST', 'Analyst'],
-  ['OPERATOR', 'Operator'],
-  ['VIEW_ONLY', 'View Only'],
+const ROLES: Array<[RoleCode,string]> = [
+  ['SUPER_ADMIN','Super Administrator'],['NATIONAL_ADMIN','National Administrator'],['POLICE','Police'],
+  ['TRANSPORT','Transport'],['PURA','PURA'],['GICTA','GICTA'],['INTELLIGENCE','Intelligence'],
+  ['ANALYST','Analyst'],['OPERATOR','Operator'],['VIEW_ONLY','View Only'],
 ];
 
-for (const [code, name] of roles) {
-  db.prepare(`INSERT OR IGNORE INTO avclpr_roles(code,name) VALUES(?,?)`).run(code, name);
-}
-
-const permissions = [
-  'dashboard.read','sites.read','sites.write','cameras.read','cameras.write',
-  'events.read','events.export','evidence.read','evidence.export',
-  'watchlists.read','watchlists.write','alerts.read','alerts.manage',
+const PERMISSIONS = [
+  'dashboard.read','sites.read','sites.write','cameras.read','cameras.write','events.read','events.export',
+  'evidence.read','evidence.export','watchlists.read','watchlists.write','alerts.read','alerts.manage',
   'reports.read','reports.export','users.read','users.write','audit.read','system.manage',
 ];
 
-for (const permission of permissions) {
-  db.prepare(`INSERT OR IGNORE INTO avclpr_permissions(code,description) VALUES(?,?)`).run(permission, permission);
-}
+const ROLE_PERMISSIONS: Record<RoleCode,string[]> = {
+  SUPER_ADMIN: PERMISSIONS,
+  NATIONAL_ADMIN: ['dashboard.read','sites.read','sites.write','cameras.read','cameras.write','events.read','events.export','evidence.read','evidence.export','watchlists.read','watchlists.write','alerts.read','alerts.manage','reports.read','reports.export','users.read','users.write','audit.read','system.manage'],
+  POLICE: ['dashboard.read','sites.read','cameras.read','events.read','events.export','evidence.read','evidence.export','watchlists.read','watchlists.write','alerts.read','alerts.manage','reports.read','reports.export'],
+  TRANSPORT: ['dashboard.read','sites.read','cameras.read','events.read','events.export','evidence.read','reports.read','reports.export'],
+  PURA: ['dashboard.read','sites.read','cameras.read','events.read','reports.read'],
+  GICTA: ['dashboard.read','sites.read','sites.write','cameras.read','cameras.write','events.read','system.manage','audit.read'],
+  INTELLIGENCE: ['dashboard.read','sites.read','cameras.read','events.read','evidence.read','evidence.export','watchlists.read','watchlists.write','alerts.read','alerts.manage','reports.read'],
+  ANALYST: ['dashboard.read','sites.read','cameras.read','events.read','events.export','reports.read','reports.export'],
+  OPERATOR: ['dashboard.read','sites.read','cameras.read','events.read','alerts.read','alerts.manage'],
+  VIEW_ONLY: ['dashboard.read','sites.read','cameras.read','events.read','alerts.read','reports.read'],
+};
 
-const fullAccessRoles: RoleCode[] = ['SUPER_ADMIN'];
-for (const role of fullAccessRoles) {
-  for (const permission of permissions) {
-    db.prepare(`INSERT OR IGNORE INTO avclpr_role_permissions(role_code,permission_code) VALUES(?,?)`).run(role, permission);
+export async function initializeProductionFoundation(): Promise<void> {
+  if (!DATABASE_URL) throw new Error('DATABASE_URL is required. SQLite is no longer an authoritative production control plane.');
+  for (const [code,name] of ROLES) await pool.query('INSERT INTO roles(code,name) VALUES($1,$2) ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name',[code,name]);
+  for (const permission of PERMISSIONS) await pool.query('INSERT INTO permissions(code,description) VALUES($1,$1) ON CONFLICT(code) DO NOTHING',[permission]);
+  for (const role of ROLES.map(x=>x[0])) {
+    await pool.query(
+      'INSERT INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r CROSS JOIN permissions p WHERE r.code=$1 AND p.code=ANY($2::text[]) ON CONFLICT DO NOTHING',
+      [role, ROLE_PERMISSIONS[role]]
+    );
   }
 }
 
-export function bootstrapAdmin(input: {
-  bootstrapSecret: string;
-  username: string;
-  displayName: string;
-  password: string;
-}): AuthUser {
-  if (!BOOTSTRAP_SECRET || input.bootstrapSecret !== BOOTSTRAP_SECRET) {
-    throw new Error('Invalid bootstrap secret.');
-  }
+function hashToken(token: string): string { return createHash('sha256').update(token).digest('hex'); }
+function newToken(): string { return randomBytes(32).toString('base64url'); }
 
-  if (input.password.length < 12) {
-    throw new Error('Administrator password must be at least 12 characters.');
-  }
-
-  const existing = db.prepare(`SELECT id FROM avclpr_users WHERE username = ?`).get(input.username);
-  if (existing) throw new Error('User already exists.');
-
-  const now = new Date().toISOString();
-  const id = randomUUID();
-  const passwordHash = bcrypt.hashSync(input.password, 12);
-
-  db.prepare(`
-    INSERT INTO avclpr_users(id,username,display_name,password_hash,role_code,active,created_at,updated_at)
-    VALUES(?,?,?,?,?,1,?,?)
-  `).run(id, input.username, input.displayName, passwordHash, 'SUPER_ADMIN', now, now);
-
-  return { id, username: input.username, displayName: input.displayName, role: 'SUPER_ADMIN', active: true };
+function mfaKey(): Buffer {
+  return createHash('sha256').update(MFA_KEY_SOURCE).digest();
 }
 
-function getUser(username: string): (AuthUser & { passwordHash: string; failedLoginCount: number; lockedUntil?: string }) | null {
-  const row = db.prepare(`SELECT * FROM avclpr_users WHERE username = ? LIMIT 1`).get(username) as any;
-  if (!row) return null;
-  return {
-    id: row.id,
-    username: row.username,
-    displayName: row.display_name,
-    role: row.role_code,
-    active: Boolean(row.active),
-    passwordHash: row.password_hash,
-    failedLoginCount: Number(row.failed_login_count || 0),
-    lockedUntil: row.locked_until || undefined,
-  };
+function encryptSecret(secret: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm',mfaKey(),iv);
+  const encrypted = Buffer.concat([cipher.update(secret,'utf8'),cipher.final()]);
+  return [iv.toString('base64url'),cipher.getAuthTag().toString('base64url'),encrypted.toString('base64url')].join('.');
 }
 
-function base64url(value: string): string {
-  return Buffer.from(value).toString('base64url');
+function decryptSecret(value: string): string {
+  const [ivB64,tagB64,dataB64] = value.split('.');
+  const decipher = createDecipheriv('aes-256-gcm',mfaKey(),Buffer.from(ivB64,'base64url'));
+  decipher.setAuthTag(Buffer.from(tagB64,'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(dataB64,'base64url')),decipher.final()]).toString('utf8');
 }
 
-function signToken(payload: Record<string, unknown>): string {
-  if (JWT_SECRET.length < 32) throw new Error('Authentication secret is not configured securely.');
-  const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const body = base64url(JSON.stringify(payload));
-  const signature = createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
-  return `${header}.${body}.${signature}`;
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(bytes: Buffer): string {
+  let bits = 0, value = 0, out = '';
+  for (const byte of bytes) { value=(value<<8)|byte; bits+=8; while(bits>=5){ out+=B32[(value>>>(bits-5))&31]; bits-=5; } }
+  if(bits>0) out+=B32[(value<<(5-bits))&31];
+  return out;
+}
+function base32Decode(input: string): Buffer {
+  let bits=0,value=0; const out:number[]=[];
+  for(const ch of input.replace(/=+$/,'').toUpperCase()){ const n=B32.indexOf(ch); if(n<0) throw new Error('Invalid MFA secret.'); value=(value<<5)|n; bits+=5; if(bits>=8){out.push((value>>>(bits-8))&255);bits-=8;} }
+  return Buffer.from(out);
+}
+function totp(secret: string, counter: number): string {
+  const key=base32Decode(secret), buf=Buffer.alloc(8);
+  buf.writeBigUInt64BE(BigInt(counter));
+  const digest=createHmac('sha1',key).update(buf).digest();
+  const offset=digest[digest.length-1]&15;
+  const code=((digest[offset]&127)<<24|(digest[offset+1]<<16)|(digest[offset+2]<<8)|digest[offset+3])%1000000;
+  return String(code).padStart(6,'0');
+}
+function verifyTotp(secret:string, code:string):boolean {
+  if(!/^\d{6}$/.test(code)) return false;
+  const counter=Math.floor(Date.now()/30000);
+  for(let delta=-1;delta<=1;delta++){ const expected=totp(secret,counter+delta); if(timingSafeEqual(Buffer.from(expected),Buffer.from(code))) return true; }
+  return false;
 }
 
-function verifyToken(token: string): Record<string, any> | null {
-  try {
-    const [header, body, signature] = token.split('.');
-    if (!header || !body || !signature) return null;
-    const expected = createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
-    const a = Buffer.from(signature);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload;
-  } catch {
+async function rowToUser(row:any): Promise<AuthUser> {
+  return {id:row.id,username:row.username,displayName:row.display_name,role:row.role_code,active:row.active,mfaEnabled:row.mfa_enabled};
+}
+
+async function userById(id:string):Promise<any|null> {
+  const r=await pool.query(`SELECT u.*,r.code AS role_code FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=$1 LIMIT 1`,[id]);
+  return r.rows[0]||null;
+}
+async function userByUsername(username:string):Promise<any|null> {
+  const r=await pool.query(`SELECT u.*,r.code AS role_code FROM users u JOIN roles r ON r.id=u.role_id WHERE u.username=$1 LIMIT 1`,[username]);
+  return r.rows[0]||null;
+}
+
+export async function login(username:string,password:string,ip?:string,userAgent?:string):Promise<any|null>{
+  const user=await userByUsername(username);
+  if(!user || !user.active) return null;
+  if(user.locked_until && new Date(user.locked_until).getTime()>Date.now()) return null;
+  const ok=await bcrypt.compare(password,user.password_hash);
+  if(!ok){
+    const failures=Number(user.failed_login_count||0)+1;
+    const locked=failures>=5?new Date(Date.now()+15*60*1000):null;
+    await pool.query('UPDATE users SET failed_login_count=$1,locked_until=$2,updated_at=now() WHERE id=$3',[failures,locked,user.id]);
+    await audit({action:'auth.login.failure',resourceType:'user',resourceId:user.id,ipAddress:ip,userAgent,metadata:{reason:'invalid_credentials',failures}});
     return null;
   }
-}
-
-export function login(username: string, password: string): { token: string; user: AuthUser } | null {
-  const user = getUser(username);
-  if (!user || !user.active) return null;
-
-  if (user.lockedUntil && new Date(user.lockedUntil).getTime() > Date.now()) return null;
-
-  if (!bcrypt.compareSync(password, user.passwordHash)) {
-    const failures = user.failedLoginCount + 1;
-    const lockedUntil = failures >= 5 ? new Date(Date.now() + 15 * 60 * 1000).toISOString() : null;
-    db.prepare(`UPDATE avclpr_users SET failed_login_count=?, locked_until=?, updated_at=? WHERE id=?`)
-      .run(failures, lockedUntil, new Date().toISOString(), user.id);
-    return null;
+  await pool.query('UPDATE users SET failed_login_count=0,locked_until=NULL,last_login_at=now(),updated_at=now() WHERE id=$1',[user.id]);
+  const privileged=['SUPER_ADMIN','NATIONAL_ADMIN','GICTA','INTELLIGENCE'].includes(user.role_code);
+  if(privileged && !user.mfa_enabled){
+    const challenge=newToken();
+    await pool.query('INSERT INTO mfa_challenges(user_id,challenge_hash,ip_address,user_agent,expires_at) VALUES($1,$2,$3,$4,now()+interval \'10 minutes\')',[user.id,hashToken(challenge),ip||null,userAgent||null]);
+    return {mfaSetupRequired:true,setupToken:challenge,user:await rowToUser(user)};
   }
-
-  const now = new Date().toISOString();
-  db.prepare(`UPDATE avclpr_users SET failed_login_count=0, locked_until=NULL, last_login_at=?, updated_at=? WHERE id=?`)
-    .run(now, now, user.id);
-
-  const token = signToken({ sub: user.id, username: user.username, role: user.role, exp: Math.floor(Date.now() / 1000) + 8 * 60 * 60 });
-  return { token, user: { id: user.id, username: user.username, displayName: user.displayName, role: user.role, active: user.active } };
+  if(privileged && user.mfa_enabled){
+    const challenge=newToken();
+    await pool.query('INSERT INTO mfa_challenges(user_id,challenge_hash,ip_address,user_agent,expires_at) VALUES($1,$2,$3,$4,now()+interval \'5 minutes\')',[user.id,hashToken(challenge),ip||null,userAgent||null]);
+    return {mfaRequired:true,challengeToken:challenge,user:await rowToUser(user)};
+  }
+  const session=await createSession(user.id,ip,userAgent);
+  await audit({userId:user.id,action:'auth.login.success',resourceType:'user',resourceId:user.id,ipAddress:ip,userAgent});
+  return {token:session.token,user:await rowToUser(user)};
 }
 
-export function authenticateToken(token: string): AuthUser | null {
-  const payload = verifyToken(token);
-  if (!payload?.sub) return null;
-  const row = db.prepare(`SELECT id,username,display_name,role_code,active FROM avclpr_users WHERE id=? LIMIT 1`).get(payload.sub) as any;
-  if (!row || !row.active) return null;
-  return { id: row.id, username: row.username, displayName: row.display_name, role: row.role_code, active: Boolean(row.active) };
+async function createSession(userId:string,ip?:string,userAgent?:string){
+  const token=newToken();
+  const max= new Date(Date.now()+SESSION_HOURS*60*60*1000);
+  await pool.query('INSERT INTO user_sessions(user_id,token_hash,ip_address,user_agent,expires_at) VALUES($1,$2,$3,$4,$5)',[userId,hashToken(token),ip||null,userAgent||null,max]);
+  return {token,expiresAt:max.toISOString()};
 }
 
-export function hasPermission(role: RoleCode, permission: string): boolean {
-  if (role === 'SUPER_ADMIN') return true;
-  const row = db.prepare(`SELECT 1 FROM avclpr_role_permissions WHERE role_code=? AND permission_code=?`).get(role, permission);
-  return Boolean(row);
+export async function completeMfa(challengeToken:string,code:string,ip?:string,userAgent?:string){
+  const r=await pool.query(`SELECT c.*,u.*,r.code AS role_code FROM mfa_challenges c JOIN users u ON u.id=c.user_id JOIN roles r ON r.id=u.role_id WHERE c.challenge_hash=$1 AND c.consumed_at IS NULL AND c.expires_at>now() LIMIT 1`,[hashToken(challengeToken)]);
+  const row=r.rows[0]; if(!row) return null;
+  if(!verifyTotp(decryptSecret(row.mfa_secret_enc),code)) return null;
+  await pool.query('UPDATE mfa_challenges SET consumed_at=now() WHERE id=$1',[row.id]);
+  const session=await createSession(row.user_id,ip,userAgent);
+  await audit({userId:row.user_id,action:'auth.mfa.success',resourceType:'user',resourceId:row.user_id,ipAddress:ip,userAgent});
+  return {token:session.token,user:await rowToUser(row)};
 }
 
-export function createAuditLog(input: {
-  userId?: string;
-  action: string;
-  resourceType?: string;
-  resourceId?: string;
-  siteId?: string;
-  ipAddress?: string;
-  userAgent?: string;
-  metadata?: unknown;
-}): void {
-  db.prepare(`
-    INSERT INTO avclpr_audit_logs(id,user_id,action,resource_type,resource_id,site_id,ip_address,user_agent,metadata_json,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?)
-  `).run(
-    randomUUID(), input.userId ?? null, input.action, input.resourceType ?? null,
-    input.resourceId ?? null, input.siteId ?? null, input.ipAddress ?? null,
-    input.userAgent ?? null, input.metadata ? JSON.stringify(input.metadata) : null,
-    new Date().toISOString()
-  );
+export async function setupMfa(setupToken:string):Promise<{secret:string;otpauthUrl:string}|null>{
+  const r=await pool.query(`SELECT c.*,u.username FROM mfa_challenges c JOIN users u ON u.id=c.user_id WHERE c.challenge_hash=$1 AND c.consumed_at IS NULL AND c.expires_at>now() LIMIT 1`,[hashToken(setupToken)]);
+  const row=r.rows[0]; if(!row) return null;
+  const secret=base32Encode(randomBytes(20));
+  await pool.query('UPDATE users SET mfa_secret_enc=$1,updated_at=now() WHERE id=$2',[encryptSecret(secret),row.user_id]);
+  const issuer='QTS-AVCLPR';
+  const otpauthUrl=`otpauth://totp/${encodeURIComponent(issuer+':'+row.username)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+  return {secret,otpauthUrl};
 }
 
-export function listSites() {
-  return db.prepare(`SELECT * FROM avclpr_sites ORDER BY site_code`).all();
+export async function enableMfa(setupToken:string,code:string,ip?:string,userAgent?:string){
+  const r=await pool.query(`SELECT c.*,u.mfa_secret_enc FROM mfa_challenges c JOIN users u ON u.id=c.user_id WHERE c.challenge_hash=$1 AND c.consumed_at IS NULL AND c.expires_at>now() LIMIT 1`,[hashToken(setupToken)]);
+  const row=r.rows[0]; if(!row||!row.mfa_secret_enc) return null;
+  if(!verifyTotp(decryptSecret(row.mfa_secret_enc),code)) return null;
+  await pool.query('UPDATE users SET mfa_enabled=true,mfa_enrolled_at=now(),updated_at=now() WHERE id=$1',[row.user_id]);
+  await pool.query('UPDATE mfa_challenges SET consumed_at=now() WHERE id=$1',[row.id]);
+  const user=await userById(row.user_id); const session=await createSession(row.user_id,ip,userAgent);
+  await audit({userId:row.user_id,action:'auth.mfa.enabled',resourceType:'user',resourceId:row.user_id,ipAddress:ip,userAgent});
+  return {token:session.token,user:await rowToUser(user)};
 }
 
-export function createSite(input: {
-  siteCode: string; name: string; road?: string; direction?: string;
-  jurisdiction?: string; latitude?: number; longitude?: number;
-}) {
-  const now = new Date().toISOString();
-  const id = randomUUID();
-  db.prepare(`INSERT INTO avclpr_sites(id,site_code,name,road,direction,jurisdiction,latitude,longitude,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, input.siteCode, input.name, input.road ?? null, input.direction ?? null, input.jurisdiction ?? null, input.latitude ?? null, input.longitude ?? null, 'active', now, now);
-  return db.prepare(`SELECT * FROM avclpr_sites WHERE id=?`).get(id);
+export async function authenticateToken(token:string):Promise<AuthUser|null>{
+  if(!token) return null;
+  const r=await pool.query(`SELECT s.*,u.username,u.display_name,u.active,u.mfa_enabled,r.code AS role_code FROM user_sessions s JOIN users u ON u.id=s.user_id JOIN roles r ON r.id=u.role_id WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND s.last_seen_at>now()-make_interval(mins=>$2) LIMIT 1`,[hashToken(token),IDLE_MINUTES]);
+  const row=r.rows[0]; if(!row||!row.active) return null;
+  await pool.query('UPDATE user_sessions SET last_seen_at=now() WHERE id=$1',[row.id]);
+  return {id:row.user_id,username:row.username,displayName:row.display_name,role:row.role_code,active:row.active,mfaEnabled:row.mfa_enabled};
 }
 
-export function listCameras(siteId?: string) {
-  if (siteId) return db.prepare(`SELECT * FROM avclpr_cameras WHERE site_id=? ORDER BY camera_code`).all(siteId);
-  return db.prepare(`SELECT * FROM avclpr_cameras ORDER BY camera_code`).all();
+export async function revokeSession(token:string,reason='logout'){ await pool.query('UPDATE user_sessions SET revoked_at=now(),revoked_reason=$1 WHERE token_hash=$2 AND revoked_at IS NULL',[reason,hashToken(token)]); }
+export async function revokeAllSessions(userId:string,reason='admin_revoke'){ await pool.query('UPDATE user_sessions SET revoked_at=now(),revoked_reason=$1 WHERE user_id=$2 AND revoked_at IS NULL',[reason,userId]); }
+
+export async function hasPermission(role:RoleCode,permission:string){ return (ROLE_PERMISSIONS[role]||[]).includes(permission); }
+
+export async function canAccessSite(userId:string,role:RoleCode,siteId:string):Promise<boolean>{
+  if(role==='SUPER_ADMIN'||role==='NATIONAL_ADMIN') return true;
+  const r=await pool.query('SELECT 1 FROM user_site_access WHERE user_id=$1 AND site_id=$2 LIMIT 1',[userId,siteId]);
+  return Boolean(r.rowCount);
 }
 
-export function createCamera(input: {
-  siteId: string; cameraCode: string; name: string; host: string;
-  rtspPort?: number; channel?: number; credentialRef?: string;
-}) {
-  const site = db.prepare(`SELECT id FROM avclpr_sites WHERE id=?`).get(input.siteId);
-  if (!site) throw new Error('Site not found.');
-  const now = new Date().toISOString();
-  const id = randomUUID();
-  db.prepare(`INSERT INTO avclpr_cameras(id,site_id,camera_code,name,host,rtsp_port,channel,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, input.siteId, input.cameraCode, input.name, input.host, input.rtspPort ?? 554, input.channel ?? 1, input.credentialRef ?? null, 'offline', now, now);
-  return db.prepare(`SELECT * FROM avclpr_cameras WHERE id=?`).get(id);
+export async function accessibleSiteIds(userId:string,role:RoleCode):Promise<string[]|null>{
+  if(role==='SUPER_ADMIN'||role==='NATIONAL_ADMIN') return null;
+  const r=await pool.query('SELECT site_id FROM user_site_access WHERE user_id=$1',[userId]);
+  return r.rows.map(x=>x.site_id);
 }
+
+export async function listSites(userId?:string,role?:RoleCode){
+  const ids=userId&&role?await accessibleSiteIds(userId,role):null;
+  if(ids===null) return (await pool.query('SELECT * FROM sites ORDER BY site_code')).rows;
+  if(!ids?.length) return [];
+  return (await pool.query('SELECT * FROM sites WHERE id=ANY($1::uuid[]) ORDER BY site_code',[ids])).rows;
+}
+
+export async function createSite(input:any){
+  const r=await pool.query('INSERT INTO sites(site_code,name,road,direction,jurisdiction,latitude,longitude) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[input.siteCode,input.name,input.road||null,input.direction||null,input.jurisdiction||null,input.latitude??null,input.longitude??null]);
+  return r.rows[0];
+}
+
+export async function listCameras(userId?:string,role?:RoleCode,siteId?:string){
+  const ids=userId&&role?await accessibleSiteIds(userId,role):null;
+  const clauses:string[]=[]; const args:any[]=[]; let n=1;
+  if(siteId){clauses.push(`site_id=$${n++}`);args.push(siteId);}
+  if(ids!==null){if(!ids?.length)return [];clauses.push(`site_id=ANY($${n++}::uuid[])`);args.push(ids);}
+  const where=clauses.length?'WHERE '+clauses.join(' AND '):'';
+  return (await pool.query(`SELECT * FROM cameras ${where} ORDER BY camera_code`,args)).rows;
+}
+
+export async function createCamera(input:any){
+  const r=await pool.query('INSERT INTO cameras(site_id,camera_code,name,host,rtsp_port,channel,credential_ref,main_stream,ai_stream,preview_stream) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',[input.siteId,input.cameraCode,input.name,input.host,input.rtspPort||554,input.channel||1,input.credentialRef||null,input.mainStream||null,input.aiStream||null,input.previewStream||null]);
+  return r.rows[0];
+}
+
+export async function listUsers(){ return (await pool.query('SELECT u.id,u.username,u.display_name,u.active,u.mfa_enabled,u.created_at,u.last_login_at,r.code AS role_code,r.name AS role_name FROM users u JOIN roles r ON r.id=u.role_id ORDER BY u.username')).rows; }
+
+export async function createUser(input:any){
+  const role=await pool.query('SELECT id,code FROM roles WHERE code=$1',[input.role]);
+  if(!role.rows[0]) throw new Error('Invalid role.');
+  const passwordHash=await bcrypt.hash(input.password,12);
+  const r=await pool.query('INSERT INTO users(username,display_name,password_hash,role_id,active) VALUES($1,$2,$3,$4,$5) RETURNING id,username,display_name,active,mfa_enabled,created_at',[input.username,input.displayName,passwordHash,role.rows[0].id,input.active!==false]);
+  return {...r.rows[0],role_code:role.rows[0].code};
+}
+
+export async function updateUser(id:string,input:any){
+  const fields:string[]=[];const args:any[]=[];let n=1;
+  if(input.displayName!==undefined){fields.push(`display_name=$${n++}`);args.push(input.displayName);}
+  if(input.active!==undefined){fields.push(`active=$${n++}`);args.push(Boolean(input.active));}
+  if(input.role!==undefined){const role=await pool.query('SELECT id FROM roles WHERE code=$1',[input.role]);if(!role.rows[0])throw new Error('Invalid role.');fields.push(`role_id=$${n++}`);args.push(role.rows[0].id);}
+  if(input.password){fields.push(`password_hash=$${n++}`);args.push(await bcrypt.hash(input.password,12));}
+  if(!fields.length)return (await pool.query('SELECT id,username,display_name,active,mfa_enabled FROM users WHERE id=$1',[id])).rows[0];
+  args.push(id);return (await pool.query(`UPDATE users SET ${fields.join(',')},updated_at=now() WHERE id=$${n} RETURNING id,username,display_name,active,mfa_enabled`,args)).rows[0];
+}
+
+export async function setUserSiteAccess(userId:string,siteIds:string[]){ await pool.query('BEGIN'); try{await pool.query('DELETE FROM user_site_access WHERE user_id=$1',[userId]);for(const siteId of siteIds)await pool.query('INSERT INTO user_site_access(user_id,site_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[userId,siteId]);await pool.query('COMMIT');}catch(e){await pool.query('ROLLBACK');throw e;} }
+
+export async function listUserSiteAccess(userId:string){ return (await pool.query('SELECT site_id FROM user_site_access WHERE user_id=$1',[userId])).rows.map(x=>x.site_id); }
+
+export async function listAuditLogs(input:any={}){const limit=Math.min(Math.max(Number(input.limit||100),1),500);const offset=Math.max(Number(input.offset||0),0);const r=await pool.query(`SELECT a.*,u.username FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT $1 OFFSET $2`,[limit,offset]);return {logs:r.rows,limit,offset};}
+
+export async function audit(input:any){ await pool.query('INSERT INTO audit_logs(user_id,action,resource_type,resource_id,site_id,ip_address,user_agent,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[input.userId||null,input.action,input.resourceType||null,input.resourceId||null,input.siteId||null,input.ipAddress||null,input.userAgent||null,input.metadata||null]); }
+
+export async function health(){const r=await pool.query('SELECT now() AS database_time');return {database:'postgresql',connected:true,databaseTime:r.rows[0].database_time};}
