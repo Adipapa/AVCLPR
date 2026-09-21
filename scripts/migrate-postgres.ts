@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pool } from '../src/lib/production-foundation.js';
 
-const files=['001_initial_schema.sql','002_security_and_sessions.sql'];
+const files=['001_initial_schema.sql','002_security_and_sessions.sql','003_evidence_governance.sql'];
 try{
   await pool.query('CREATE TABLE IF NOT EXISTS schema_migrations(version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())');
   for(const file of files){
