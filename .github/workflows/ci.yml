@@ -21,3 +21,46 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m compileall services/ai-engine/app
+
+  postgres-restore:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: avclpr
+          POSTGRES_USER: avclpr
+          POSTGRES_PASSWORD: avclpr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U avclpr -d avclpr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - name: Migrate and seed test database
+        env:
+          DATABASE_URL: postgresql://avclpr:avclpr_test@localhost:5432/avclpr
+          AVCLPR_AUTH_SECRET: ci-only-auth-secret-change-me-1234567890
+          AVCLPR_MFA_ENCRYPTION_KEY: ci-only-mfa-key-change-me-1234567890
+          SEED_ADMIN_PASSWORD: CI-only-super-admin-password-123!
+        run: npm run db:migrate && npm run seed:superadmin
+      - name: Backup
+        env:
+          DATABASE_URL: postgresql://avclpr:avclpr_test@localhost:5432/avclpr
+          BACKUP_DIR: /tmp/avclpr-backup
+        run: bash deploy/backup-postgres.sh
+      - name: Restore
+        env:
+          DATABASE_URL: postgresql://avclpr:avclpr_test@localhost:5432/avclpr
+          BACKUP_FILE: /tmp/avclpr-backup/$(ls /tmp/avclpr-backup/*.dump | xargs -n1 basename)
+        run: |
+          psql "$DATABASE_URL" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+          pg_restore --clean --if-exists --no-owner --no-privileges --dbname="$DATABASE_URL" "$BACKUP_FILE"
+          test "$(psql "$DATABASE_URL" -tAc 'select count(*) from users')" -ge 1
