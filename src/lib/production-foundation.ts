@@ -273,7 +273,7 @@ export async function setUserSiteAccess(userId:string,siteIds:string[]){ const c
 
 export async function listUserSiteAccess(userId:string){ return (await pool.query('SELECT site_id FROM user_site_access WHERE user_id=$1',[userId])).rows.map(x=>x.site_id); }
 
-export async function listAuditLogs(input:any={}){const limit=Math.min(Math.max(Number(input.limit||100),1),500);const offset=Math.max(Number(input.offset||0),0);const r=await pool.query(`SELECT a.*,u.username FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT $1 OFFSET $2`,[limit,offset]);return {logs:r.rows,limit,offset};}
+export async function listAuditLogs(input:any={}){const limit=Math.min(Math.max(Number(input.limit||100),1),500);const offset=Math.max(Number(input.offset||0),0);const ids=input.userId&&input.role?await accessibleSiteIds(input.userId,input.role):null;const clauses:string[]=[];const args:any[]=[];let n=1;if(ids!==null){if(!ids?.length)return {logs:[],limit,offset};clauses.push(`a.site_id=ANY(${n++}::uuid[])`);args.push(ids);}const where=clauses.length?'WHERE '+clauses.join(' AND '):'';args.push(limit,offset);const r=await pool.query(`SELECT a.*,u.username FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ${where} ORDER BY a.created_at DESC LIMIT ${n++} OFFSET ${n}`,args);return {logs:r.rows,limit,offset};}
 
 export async function audit(input:any){ await pool.query('INSERT INTO audit_logs(user_id,action,resource_type,resource_id,site_id,ip_address,user_agent,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[input.userId||null,input.action,input.resourceType||null,input.resourceId||null,input.siteId||null,input.ipAddress||null,input.userAgent||null,input.metadata||null]); }
 
