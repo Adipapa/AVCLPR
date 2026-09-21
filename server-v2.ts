@@ -6,7 +6,7 @@ import {
   revokeSession, revokeAllSessions, hasPermission, canAccessSite, accessibleSiteIds,
   listSites, createSite, listCameras, createCamera, updateCamera, deleteCamera,
   listUsers, createUser, updateUser, setUserSiteAccess, listUserSiteAccess, listAuditLogs, audit,
-  listWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, listSessions, health, AuthUser, RoleCode,
+  listWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, listSessions, getEvidence, recordEvidenceAccess, health, AuthUser, RoleCode,
 } from './src/lib/production-foundation.js';
 
 dotenv.config();
@@ -142,6 +142,17 @@ async function fetchScoped(path:string,siteIds:string[]|null){
 app.get('/api/v2/events',requireAuth,requirePermission('events.read'),async(req:AuthenticatedRequest,res)=>{try{const limit=Math.min(Math.max(Number(req.query.limit||100),1),500);const siteId=req.query.siteId?validateUuid(req.query.siteId,'siteId'):undefined;if(siteId&&!(await requireSite(req,siteId)))return res.status(403).json({success:false,error:'Site access denied.'});const ids=siteId?[siteId]:await accessibleSiteIds(req.user!.id,req.user!.role);const body=await fetchScoped(`/v1/events?limit=${limit}`,ids);res.json(body);}catch(e){error(res,e,503);}});
 app.get('/api/v2/alerts',requireAuth,requirePermission('alerts.read'),async(req:AuthenticatedRequest,res)=>{try{const ids=await accessibleSiteIds(req.user!.id,req.user!.role);const body=await fetchScoped(`/v1/alerts?limit=500&status=${encodeURIComponent(String(req.query.status||'active'))}`,ids);res.json(body);}catch(e){error(res,e,503);}});
 app.post('/api/v2/alerts/:alertId/acknowledge',requireAuth,requirePermission('alerts.manage'),async(req:AuthenticatedRequest,res)=>{try{const body=await aiRequest(`/v1/alerts/${encodeURIComponent(req.params.alertId)}/acknowledge?user_id=${encodeURIComponent(req.user!.id)}`,{method:'POST'});await audit({userId:req.user!.id,action:'alert.acknowledge',resourceType:'alert',resourceId:req.params.alertId,ipAddress:req.ip,userAgent:req.header('user-agent')});res.json(body);}catch(e){error(res,e,503);}});
+
+app.get('/api/v2/evidence/:id',requireAuth,requirePermission('evidence.read'),async(req:AuthenticatedRequest,res)=>{
+  try{
+    const evidence=await getEvidence(validateUuid(req.params.id,'evidenceId'));
+    if(!evidence)return res.status(404).json({success:false,error:'Evidence not found.'});
+    if(!(await requireSite(req,evidence.site_id)))return res.status(403).json({success:false,error:'Site access denied.'});
+    await recordEvidenceAccess(evidence.id,req.user!.id,'view',req.ip,req.header('user-agent'));
+    await audit({userId:req.user!.id,action:'evidence.view',resourceType:'evidence',resourceId:evidence.id,siteId:evidence.site_id,ipAddress:req.ip,userAgent:req.header('user-agent')});
+    res.json({success:true,evidence:{id:evidence.id,event_id:evidence.event_id,evidence_type:evidence.evidence_type,sha256_hash:evidence.sha256_hash,size_bytes:evidence.size_bytes,captured_at:evidence.captured_at,retention_until:evidence.retention_until}});
+  }catch(e){error(res,e);}
+});
 
 app.get('/api/v2/watchlists',requireAuth,requirePermission('watchlists.read'),async(_req,res)=>res.json({success:true,watchlists:await listWatchlists()}));
 app.post('/api/v2/watchlists',requireAuth,requirePermission('watchlists.write'),async(req:AuthenticatedRequest,res)=>{try{const item=await createWatchlist(req.body||{},req.user!.id);await audit({userId:req.user!.id,action:'watchlist.create',resourceType:'watchlist',resourceId:item.id,ipAddress:req.ip,userAgent:req.header('user-agent'),metadata:{category:item.category}});res.status(201).json({success:true,watchlist:item});}catch(e){error(res,e);}});
