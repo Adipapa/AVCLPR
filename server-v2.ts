@@ -6,7 +6,7 @@ import {
   revokeSession, revokeAllSessions, hasPermission, canAccessSite, accessibleSiteIds,
   listSites, createSite, listCameras, createCamera, updateCamera, deleteCamera,
   listUsers, createUser, updateUser, setUserSiteAccess, listUserSiteAccess, listAuditLogs, audit,
-  listWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, listSessions, getEvidence, recordEvidenceAccess, health, AuthUser, RoleCode,
+  listWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, listSessions, getEvidence, recordEvidenceAccess, health, metrics, AuthUser, RoleCode,
 } from './src/lib/production-foundation.js';
 
 dotenv.config();
@@ -91,6 +91,28 @@ async function aiRequest(path:string,init:RequestInit={}){
   if(!response.ok)throw new Error(body?.detail||body?.error||`AI service returned ${response.status}`);
   return body;
 }
+
+app.get('/api/v2/metrics',requireAuth,requirePermission('system.manage'),async(_req,res)=>{
+  const m=await metrics();
+  const lines=[
+    '# HELP avclpr_active_users Active users',
+    '# TYPE avclpr_active_users gauge',
+    'avclpr_active_users '+m.users,
+    '# HELP avclpr_active_sessions Active server sessions',
+    '# TYPE avclpr_active_sessions gauge',
+    'avclpr_active_sessions '+m.activeSessions,
+    '# HELP avclpr_vehicle_events_total Total vehicle events',
+    '# TYPE avclpr_vehicle_events_total counter',
+    'avclpr_vehicle_events_total '+m.vehicleEvents,
+    '# HELP avclpr_active_alerts Active alerts',
+    '# TYPE avclpr_active_alerts gauge',
+    'avclpr_active_alerts '+m.activeAlerts,
+    '# HELP avclpr_audit_events_24h Audit events in last 24 hours',
+    '# TYPE avclpr_audit_events_24h gauge',
+    'avclpr_audit_events_24h '+m.auditEvents24h
+  ];
+  res.type('text/plain').send(lines.join('\n')+'\n');
+});
 
 app.get('/api/v2/health',async(_req,res)=>{
   try{return res.json({success:true,system:'AVCLPR',version:'2-production-foundation',status:'online',timestamp:new Date().toISOString(),database:await health()});}
