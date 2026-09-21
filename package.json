@@ -1,15 +1,15 @@
 {
   "name": "avclpr1",
-  "version": "2.0.0-foundation",
+  "version": "2.1.0-production-hardening",
   "description": "QTS AI Vehicle Intelligence and License Plate Recognition Platform",
-  "main": "server.ts",
+  "main": "server-v2.ts",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "tsx --import dotenv/config server-v2.ts",
     "dev:v2": "tsx --import dotenv/config server-v2.ts",
     "seed:superadmin": "tsx scripts/seed-superadmin.ts",
     "build": "tsc",
     "build:v2": "tsc",
-    "start": "node dist/server.js",
+    "start": "node --import dotenv/config dist/server-v2.js",
     "start:v2": "node --import dotenv/config dist/server-v2.js",
     "db:migrate": "tsx scripts/migrate-postgres.ts"
   },
